@@ -3,11 +3,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import List
 from uuid import UUID
+from app.core.security import hashear_contrasena
 from app.database import get_db
 from app.models.cliente import Cliente
 from app.models.empresa import Empresa
 from app.models.usuario import Usuario
-from app.schemas.cliente import ClienteCrear, ClienteOutput
+from app.schemas.cliente import ClienteCrear, ClienteCrearCompleto, ClienteCrearOutput, ClienteOutput
 from app.services.venta_service import obtener_saldo_cliente
 from app.core.dependencies import get_usuario_actual, requiere_admin, requiere_vendedor
 
@@ -68,23 +69,86 @@ def obtener_saldo(
     return {"cliente_id": cliente_id, "saldo_actual": float(saldo)}
 
 
-@router.post("/", response_model=ClienteOutput)
+@router.post("/", response_model=ClienteCrearOutput)
 def crear_cliente(
-    datos:   ClienteCrear,
+    datos:   ClienteCrearCompleto,
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_admin)
+    usuario: Usuario = Depends(requiere_vendedor)   # Vendedor o admin pueden crear
 ):
-    cliente = Cliente(**datos.model_dump())
+    # Verificar que la cédula no exista
+    existe = db.query(Cliente).filter(
+        Cliente.cedula == datos.cedula
+    ).first()
+    if existe:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ya existe un cliente con cédula {datos.cedula}."
+        )
+
+    # Verificar correo único si se proporcionó
+    if datos.correo:
+        correo_existe = db.query(Cliente).filter(
+            Cliente.correo == datos.correo
+        ).first()
+        if correo_existe:
+            raise HTTPException(
+                status_code=400,
+                detail="El correo ya está registrado."
+            )
+
+    # Crear usuario de app si se proporcionaron credenciales
+    usuario_app = None
+    if datos.nombre_usuario and datos.contrasena:
+        # Verificar que el nombre de usuario no exista
+        user_existe = db.query(Usuario).filter(
+            Usuario.nombre_usuario == datos.nombre_usuario
+        ).first()
+        if user_existe:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El usuario '{datos.nombre_usuario}' ya existe."
+            )
+
+        usuario_app = Usuario(
+            nombre_usuario  = datos.nombre_usuario,
+            correo          = datos.correo,
+            contrasena_hash = hashear_contrasena(datos.contrasena),
+            rol             = "cliente",
+        )
+        db.add(usuario_app)
+        db.flush()  # Para obtener el id antes del commit
+
+    # Crear el cliente
+    cliente = Cliente(
+        usuario_id = usuario_app.id if usuario_app else None,
+        empresa_id = datos.empresa_id,
+        cedula     = datos.cedula,
+        nombre     = datos.nombre,
+        correo     = datos.correo,
+        telefono   = datos.telefono,
+    )
     db.add(cliente)
     db.commit()
     db.refresh(cliente)
-    return ClienteOutput(
-        id       = cliente.id,
-        cedula   = cliente.cedula,
-        nombre   = cliente.nombre,
-        correo   = cliente.correo,
-        telefono = cliente.telefono,
+
+    # Obtener nombre empresa si existe
+    empresa_nombre = None
+    if cliente.empresa_id:
+        empresa = db.query(Empresa).filter(
+            Empresa.id == cliente.empresa_id
+        ).first()
+        empresa_nombre = empresa.nombre if empresa else None
+
+    return ClienteCrearOutput(
+        id           = cliente.id,
+        cedula       = cliente.cedula,
+        nombre       = cliente.nombre,
+        correo       = cliente.correo,
+        telefono     = cliente.telefono,
+        empresa      = empresa_nombre,
+        tiene_acceso = usuario_app is not None,
     )
+
 
 @router.get("/{cliente_id}/historial")
 def historial_cliente(
@@ -108,3 +172,15 @@ def historial_cliente(
     ).mappings().all()
 
     return [dict(r) for r in resultado]
+
+
+@router.get("/empresas/lista")
+def listar_empresas(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor)
+):
+    empresas = db.query(Empresa).filter(
+        Empresa.esta_activa == True
+    ).order_by(Empresa.nombre).all()
+    return [{"id": str(e.id), "nombre": e.nombre, "direccion": e.direccion}
+            for e in empresas]
