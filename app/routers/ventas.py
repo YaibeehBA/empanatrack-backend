@@ -1,5 +1,6 @@
-# app/routers/ventas.py
+from uuid import UUID
 from fastapi import APIRouter, Depends, Query
+from psycopg2 import Date
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date
@@ -37,15 +38,32 @@ def crear_venta(
 
 @router.get("/", response_model=List[VentaOutput])
 def listar_ventas(
-    fecha:   Optional[date] = Query(default=None, description="Filtrar por fecha (YYYY-MM-DD)"),
-    db:      Session        = Depends(get_db),
-    usuario: Usuario        = Depends(requiere_vendedor)
+    fecha:      Optional[date] = Query(default=None),
+    cliente_id: Optional[UUID] = Query(default=None),
+    estado:     Optional[str]  = Query(default=None),
+    db:         Session        = Depends(get_db),
+    usuario:    Usuario        = Depends(requiere_vendedor)
 ):
-    vendedor = db.query(Vendedor).filter(Vendedor.usuario_id == usuario.id).first()
-    query    = db.query(Venta).filter(Venta.vendedor_id == vendedor.id)
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id
+    ).first()
+
+    # Si es admin sin vendedor asociado, devolver lista vacía
+    # (el admin usa sus propios endpoints en /admin)
+    if not vendedor:
+        return []
+
+    # SIEMPRE filtrar por el vendedor autenticado
+    query = db.query(Venta).filter(Venta.vendedor_id == vendedor.id)
 
     if fecha:
-        query = query.filter(Venta.fecha_venta.cast(date) == fecha)
+        query = query.filter(
+            Venta.fecha_venta.cast(Date) == fecha
+        )
+    if cliente_id:
+        query = query.filter(Venta.cliente_id == cliente_id)
+    if estado:
+        query = query.filter(Venta.estado == estado)
 
     ventas = query.order_by(Venta.fecha_venta.desc()).all()
 

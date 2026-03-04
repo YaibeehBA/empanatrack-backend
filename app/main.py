@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, ventas, clientes, reportes, productos, pagos
+from app.routers import admin, auth, ventas, clientes, reportes, productos, pagos
 
 app = FastAPI(
     title       = "EmpanaTrack API",
@@ -25,6 +25,7 @@ app.include_router(clientes.router)
 app.include_router(reportes.router)
 app.include_router(productos.router)
 app.include_router(pagos.router)
+app.include_router(admin.router)
 
 @app.get("/", tags=["Health"])
 def health_check():

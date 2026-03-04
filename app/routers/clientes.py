@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -8,6 +10,7 @@ from app.database import get_db
 from app.models.cliente import Cliente
 from app.models.empresa import Empresa
 from app.models.usuario import Usuario
+from app.models.vendedor import Vendedor
 from app.schemas.cliente import ClienteCrear, ClienteCrearCompleto, ClienteCrearOutput, ClienteOutput
 from app.services.venta_service import obtener_saldo_cliente
 from app.core.dependencies import get_usuario_actual, requiere_admin, requiere_vendedor
@@ -17,9 +20,37 @@ router = APIRouter(prefix="/clientes", tags=["Clientes"])
 @router.get("/", response_model=List[ClienteOutput])
 def listar_clientes(
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_vendedor)
+    usuario: Usuario = Depends(get_usuario_actual)
 ):
-    clientes = db.query(Cliente).filter(Cliente.esta_activo == True).all()
+    # Admin ve todos
+    if usuario.rol == "administrador":
+        clientes = db.query(Cliente).filter(
+            Cliente.esta_activo == True
+        ).order_by(Cliente.nombre).all()
+        return [
+            ClienteOutput(
+                id           = c.id,
+                cedula       = c.cedula,
+                nombre       = c.nombre,
+                correo       = c.correo,
+                telefono     = c.telefono,
+                empresa      = c.empresa.nombre if c.empresa else None,
+                saldo_actual = float(obtener_saldo_cliente(db, c.id)),
+            ) for c in clientes
+        ]
+
+    # Vendedor ve TODOS los clientes activos
+    # (para poder venderles), pero la deuda es solo la suya
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id
+    ).first()
+    if not vendedor:
+        return []
+
+    clientes = db.query(Cliente).filter(
+        Cliente.esta_activo == True
+    ).order_by(Cliente.nombre).all()
+
     return [
         ClienteOutput(
             id           = c.id,
@@ -28,10 +59,47 @@ def listar_clientes(
             correo       = c.correo,
             telefono     = c.telefono,
             empresa      = c.empresa.nombre if c.empresa else None,
-            saldo_actual = float(obtener_saldo_cliente(db, c.id)),
+            # Deuda solo con este vendedor
+            saldo_actual = float(obtener_saldo_vendedor_cliente(
+                db, c.id, vendedor.id
+            )),
         ) for c in clientes
     ]
+def obtener_saldo_vendedor_cliente(
+    db:          Session,
+    cliente_id:  UUID,
+    vendedor_id: UUID
+) -> Decimal:
+    """Saldo que debe el cliente específicamente a este vendedor."""
+    from sqlalchemy import text
 
+    # Sumar ventas pendientes de este vendedor con este cliente
+    deuda = db.execute(
+        text("""
+            SELECT COALESCE(SUM(monto_pendiente), 0)
+            FROM ventas
+            WHERE cliente_id  = :cid
+              AND vendedor_id = :vid
+              AND tipo        = 'credito'
+              AND estado     != 'pagado'
+        """),
+        {"cid": str(cliente_id), "vid": str(vendedor_id)}
+    ).scalar() or 0
+
+    # Restar adelantos generales pagados a este vendedor
+    adelantos = db.execute(
+        text("""
+            SELECT COALESCE(SUM(monto), 0)
+            FROM pagos
+            WHERE cliente_id  = :cid
+              AND vendedor_id = :vid
+              AND venta_id   IS NULL
+        """),
+        {"cid": str(cliente_id), "vid": str(vendedor_id)}
+    ).scalar() or 0
+
+    saldo = Decimal(str(deuda)) - Decimal(str(adelantos))
+    return max(saldo, Decimal("0.00"))
 
 @router.get("/mi-perfil")
 def mi_perfil(

@@ -41,7 +41,7 @@ router = APIRouter(prefix="/pagos", tags=["Pagos"])
 def registrar_pago(
     datos:   PagoCrear,
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_vendedor)
+    usuario: Usuario = Depends(get_usuario_actual)   
 ):
     # Verificar que el cliente existe
     cliente = db.query(Cliente).filter(
@@ -51,14 +51,32 @@ def registrar_pago(
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado.")
 
-    # Verificar que el vendedor existe
-    vendedor = db.query(Vendedor).filter(
-        Vendedor.usuario_id == usuario.id
-    ).first()
+    # Obtener el vendedor según el rol
+    if usuario.rol == "administrador":
+        # El admin usa el vendedor que más ventas tiene con ese cliente
+        # o el primero disponible
+        from app.models.venta import Venta as VentaModel
+        venta_reciente = db.query(VentaModel).filter(
+            VentaModel.cliente_id == datos.cliente_id
+        ).order_by(VentaModel.fecha_venta.desc()).first()
+
+        if venta_reciente:
+            vendedor = db.query(Vendedor).filter(
+                Vendedor.id == venta_reciente.vendedor_id
+            ).first()
+        else:
+            vendedor = db.query(Vendedor).filter(
+                Vendedor.esta_activo == True
+            ).first()
+    else:
+        vendedor = db.query(Vendedor).filter(
+            Vendedor.usuario_id == usuario.id
+        ).first()
+
     if not vendedor:
         raise HTTPException(status_code=404, detail="Vendedor no encontrado.")
 
-    # Si se especificó una venta, verificar que pertenece al cliente
+    # Verificar venta si se especificó
     if datos.venta_id:
         venta = db.query(Venta).filter(
             Venta.id         == datos.venta_id,
@@ -71,7 +89,7 @@ def registrar_pago(
                 detail="Venta no encontrada o ya está pagada."
             )
 
-    # Verificar que el monto no supere lo que debe
+    # Verificar que el monto no supere el saldo
     saldo_actual = db.execute(
         text("SELECT calcular_saldo_cliente(:cid)"),
         {"cid": str(datos.cliente_id)}
