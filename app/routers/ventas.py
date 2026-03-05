@@ -2,6 +2,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from psycopg2 import Date
 from sqlalchemy.orm import Session
+from datetime import date, timedelta
 from typing import List, Optional
 from datetime import date
 from app.database import get_db
@@ -66,6 +67,57 @@ def listar_ventas(
         query = query.filter(Venta.estado == estado)
 
     ventas = query.order_by(Venta.fecha_venta.desc()).all()
+
+    return [
+        VentaOutput(
+            id              = v.id,
+            tipo            = v.tipo,
+            monto_total     = float(v.monto_total),
+            monto_pagado    = float(v.monto_pagado),
+            monto_pendiente = float(v.monto_pendiente),
+            estado          = v.estado,
+            fecha_venta     = str(v.fecha_venta),
+            cliente         = v.cliente.nombre if v.cliente else None,
+            vendedor        = vendedor.nombre_completo,
+        ) for v in ventas
+    ]
+
+
+@router.get("/historial", response_model=List[VentaOutput])
+def historial_ventas(
+    periodo: str     = Query(default="hoy"),
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor)
+):
+    from datetime import date, timedelta
+    from sqlalchemy import text, cast, Date as SADate
+
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id
+    ).first()
+    if not vendedor:
+        return []
+
+    hoy = date.today()
+    if periodo == "hoy":
+        desde, hasta = hoy, hoy
+    elif periodo == "ayer":
+        desde = hoy - timedelta(days=1)
+        hasta = desde
+    elif periodo == "semana":
+        desde = hoy - timedelta(days=6)
+        hasta = hoy
+    elif periodo == "mes":
+        desde = hoy.replace(day=1)
+        hasta = hoy
+    else:
+        desde, hasta = hoy, hoy
+
+    ventas = db.query(Venta).filter(
+        Venta.vendedor_id == vendedor.id,
+        cast(Venta.fecha_venta, SADate) >= desde,
+        cast(Venta.fecha_venta, SADate) <= hasta,
+    ).order_by(Venta.fecha_venta.desc()).all()
 
     return [
         VentaOutput(

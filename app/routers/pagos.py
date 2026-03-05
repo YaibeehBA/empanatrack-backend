@@ -1,4 +1,3 @@
-# app/routers/pagos.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -111,7 +110,46 @@ def registrar_pago(
         notas       = datos.notas,
     )
     db.add(pago)
-    db.commit()
+    
+    
+    # Si es abono general (sin venta_id), distribuir entre ventas pendientes
+    if not datos.venta_id:
+        from sqlalchemy import text as sql_text
+
+        ventas_pendientes = db.query(Venta).filter(
+            Venta.cliente_id  == datos.cliente_id,
+            Venta.vendedor_id == vendedor.id,
+            Venta.estado      != 'pagado',
+            Venta.tipo        == 'credito',
+        ).order_by(Venta.fecha_venta.asc()).all()
+
+        monto_restante = float(datos.monto)
+        for v in ventas_pendientes:
+            if monto_restante <= 0:
+                break
+            pendiente = float(v.monto_pendiente)
+            if monto_restante >= pendiente:
+                v.monto_pagado    = v.monto_total
+                v.monto_pendiente = 0
+                # Cast explícito al tipo ENUM via SQL raw
+                db.execute(
+                    sql_text("UPDATE ventas SET estado = 'pagado'::estado_venta WHERE id = :id"),
+                    {"id": str(v.id)}
+                )
+                monto_restante -= pendiente
+            else:
+                v.monto_pagado    = float(v.monto_pagado) + monto_restante
+                v.monto_pendiente = pendiente - monto_restante
+                db.execute(
+                    sql_text("UPDATE ventas SET estado = 'parcial'::estado_venta WHERE id = :id"),
+                    {"id": str(v.id)}
+                )
+                monto_restante = 0
+
+        db.commit()  # Commit para guardar los cambios en las ventas
+   
+
+    db.commit()  # Commit para guardar el pago
     db.refresh(pago)
 
     return PagoOutput(
