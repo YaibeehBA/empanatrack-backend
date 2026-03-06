@@ -70,36 +70,16 @@ def obtener_saldo_vendedor_cliente(
     cliente_id:  UUID,
     vendedor_id: UUID
 ) -> Decimal:
-    """Saldo que debe el cliente específicamente a este vendedor."""
+    """Usa la función PostgreSQL para calcular saldo por vendedor."""
     from sqlalchemy import text
-
-    # Sumar ventas pendientes de este vendedor con este cliente
-    deuda = db.execute(
-        text("""
-            SELECT COALESCE(SUM(monto_pendiente), 0)
-            FROM ventas
-            WHERE cliente_id  = :cid
-              AND vendedor_id = :vid
-              AND tipo        = 'credito'
-              AND estado     != 'pagado'
-        """),
-        {"cid": str(cliente_id), "vid": str(vendedor_id)}
-    ).scalar() or 0
-
-    # Restar adelantos generales pagados a este vendedor
-    adelantos = db.execute(
-        text("""
-            SELECT COALESCE(SUM(monto), 0)
-            FROM pagos
-            WHERE cliente_id  = :cid
-              AND vendedor_id = :vid
-              AND venta_id   IS NULL
-        """),
-        {"cid": str(cliente_id), "vid": str(vendedor_id)}
-    ).scalar() or 0
-
-    saldo = Decimal(str(deuda)) - Decimal(str(adelantos))
-    return max(saldo, Decimal("0.00"))
+    resultado = db.execute(
+        text("SELECT calcular_saldo_cliente_vendedor(:cid, :vid)"),
+        {
+            "cid": str(cliente_id),
+            "vid": str(vendedor_id),
+        }
+    ).scalar()
+    return Decimal(str(resultado or 0))
 
 @router.get("/mi-perfil")
 def mi_perfil(
