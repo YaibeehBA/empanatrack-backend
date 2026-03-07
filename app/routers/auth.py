@@ -36,15 +36,17 @@ def login(datos: LoginInput, db: Session = Depends(get_db)):
     token = crear_token({"sub": str(usuario.id), "rol": usuario.rol})
     return TokenOutput(access_token=token, rol=usuario.rol, nombre=nombre)
 
-
-
 class RegistroClientePublico(BaseModel):
-    cedula:         str
-    nombre:         str
-    correo:         Optional[str] = None
-    telefono:       Optional[str] = None
-    nombre_usuario: str
-    contrasena:     str
+    cedula:            str
+    nombre:            str
+    correo:            Optional[str] = None
+    telefono:          Optional[str] = None
+    nombre_usuario:    str
+    contrasena:        str
+    empresa_id:        Optional[str] = None
+    empresa_nombre:    Optional[str] = None
+    empresa_direccion: Optional[str] = None
+    empresa_telefono:  Optional[str] = None
 
 @router.post("/registro")
 def registro_cliente(
@@ -69,7 +71,7 @@ def registro_cliente(
             detail=f"El usuario '{datos.nombre_usuario}' ya está en uso."
         )
 
-    # Verificar correo único si se proporcionó
+    # Verificar correo único
     if datos.correo:
         if db.query(Usuario).filter(
             Usuario.correo == datos.correo
@@ -85,7 +87,47 @@ def registro_cliente(
             detail="La contraseña debe tener al menos 6 caracteres."
         )
 
-    # Crear usuario
+    # ── Resolver empresa ──────────────────────────────
+    empresa_id_final = None
+
+    if datos.empresa_id:
+        from app.models.empresa import Empresa
+        empresa = db.query(Empresa).filter(
+            Empresa.id == datos.empresa_id
+        ).first()
+        if not empresa:
+            raise HTTPException(
+                status_code=404,
+                detail="La empresa seleccionada no existe."
+            )
+        empresa_id_final = empresa.id
+
+    elif datos.empresa_nombre and datos.empresa_nombre.strip():
+        from app.models.empresa import Empresa
+        # Si ya existe con ese nombre, vincular
+        empresa_existe = db.query(Empresa).filter(
+            Empresa.nombre.ilike(datos.empresa_nombre.strip())
+        ).first()
+        if empresa_existe:
+            empresa_id_final = empresa_existe.id
+        else:
+            # Crear empresa nueva con todos los datos
+            nueva_empresa = Empresa(
+                nombre    = datos.empresa_nombre.strip(),
+                direccion = datos.empresa_direccion.strip()
+                    if datos.empresa_direccion
+                    and datos.empresa_direccion.strip()
+                    else None,
+                telefono  = datos.empresa_telefono.strip()
+                    if datos.empresa_telefono
+                    and datos.empresa_telefono.strip()
+                    else None,
+            )
+            db.add(nueva_empresa)
+            db.flush()
+            empresa_id_final = nueva_empresa.id
+
+    # ── Crear usuario ─────────────────────────────────
     nuevo_usuario = Usuario(
         nombre_usuario  = datos.nombre_usuario,
         correo          = datos.correo,
@@ -95,19 +137,20 @@ def registro_cliente(
     db.add(nuevo_usuario)
     db.flush()
 
-    # Crear cliente vinculado
+    # ── Crear cliente ─────────────────────────────────
     cliente = Cliente(
         usuario_id = nuevo_usuario.id,
         cedula     = datos.cedula,
         nombre     = datos.nombre,
         correo     = datos.correo,
         telefono   = datos.telefono,
+        empresa_id = empresa_id_final,
     )
     db.add(cliente)
     db.commit()
 
     return {
-        "mensaje":  "Registro exitoso. Ya puedes iniciar sesión.",
-        "usuario":  datos.nombre_usuario,
-        "nombre":   datos.nombre,
+        "mensaje": "Registro exitoso. Ya puedes iniciar sesión.",
+        "usuario": datos.nombre_usuario,
+        "nombre":  datos.nombre,
     }

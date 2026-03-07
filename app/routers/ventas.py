@@ -23,6 +23,41 @@ def crear_venta(
 ):
     vendedor = db.query(Vendedor).filter(Vendedor.usuario_id == usuario.id).first()
     venta    = registrar_venta(db, datos, vendedor.id)
+    
+    # ======================================================
+    # NUEVO: Enviar notificación push al cliente si es crédito
+    # ======================================================
+    if venta.tipo == "credito" and venta.cliente_id:
+        from app.services.notificaciones import enviar_notificacion
+        from app.models.cliente import Cliente as ClienteModel
+
+        cliente_obj = db.query(ClienteModel).filter(
+            ClienteModel.id == venta.cliente_id
+        ).first()
+
+        if cliente_obj and cliente_obj.usuario_id:
+            # Construir detalle de productos (asumiendo que venta tiene relación con detalle)
+            detalle_texto = ", ".join([
+                f"{item.cantidad}x {item.producto.nombre}"
+                for item in venta.detalle  # Asegúrate que venta.detalle exista
+            ])
+
+            enviar_notificacion(
+                db         = db,
+                usuario_id = cliente_obj.usuario_id,
+                titulo     = "🫓 Nueva compra registrada",
+                cuerpo     = (
+                    f"Se registró una compra de "
+                    f"${venta.monto_total:.2f}. "
+                    f"Detalle: {detalle_texto}"
+                ),
+                datos = {
+                    "tipo":      "venta_fiado",
+                    "venta_id":  str(venta.id),
+                    "monto":     str(venta.monto_total),
+                },
+            )
+    # ======================================================
 
     return VentaOutput(
         id              = venta.id,
