@@ -30,18 +30,29 @@ def crear_venta(
     if venta.tipo == "credito" and venta.cliente_id:
         from app.services.notificaciones import enviar_notificacion
         from app.models.cliente import Cliente as ClienteModel
+        from decimal import Decimal
+        from sqlalchemy import func
 
         cliente_obj = db.query(ClienteModel).filter(
             ClienteModel.id == venta.cliente_id
         ).first()
 
         if cliente_obj and cliente_obj.usuario_id:
+            # Calcular deuda TOTAL del cliente (no solo esta venta)
+            deuda_total = db.query(
+                func.sum(Venta.monto_pendiente)
+            ).filter(
+                Venta.cliente_id == venta.cliente_id,
+                Venta.estado.in_(["pendiente", "parcial"])
+            ).scalar() or Decimal("0.00")
+
             print(f"\n{'='*50}")
             print(f"🔔 [VENTAS] Intentando enviar notificacion...")
             print(f"   venta_id:    {venta.id}")
             print(f"   cliente_id:  {venta.cliente_id}")
             print(f"   usuario_id:  {cliente_obj.usuario_id}")
             print(f"   monto_total: ${venta.monto_total:.2f}")
+            print(f"   deuda_total: ${deuda_total:.2f}")
             
             # Construir detalle de productos (asumiendo que venta tiene relación con detalle)
             detalle_texto = ", ".join([
@@ -56,12 +67,14 @@ def crear_venta(
                 cuerpo     = (
                     f"Se registró una compra de "
                     f"${venta.monto_total:.2f}. "
+                    f"Tu deuda total es ${deuda_total:.2f}. "
                     f"Detalle: {detalle_texto}"
                 ),
                 datos = {
-                    "tipo":      "venta_fiado",
-                    "venta_id":  str(venta.id),
-                    "monto":     str(venta.monto_total),
+                    "tipo":        "venta_fiado",
+                    "venta_id":    str(venta.id),
+                    "monto":       str(venta.monto_total),
+                    "deuda_total": str(deuda_total),
                 },
             )
             print(f"   Resultado FCM: {resultado}")
