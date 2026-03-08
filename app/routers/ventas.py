@@ -36,13 +36,20 @@ def crear_venta(
         ).first()
 
         if cliente_obj and cliente_obj.usuario_id:
+            print(f"\n{'='*50}")
+            print(f"🔔 [VENTAS] Intentando enviar notificacion...")
+            print(f"   venta_id:    {venta.id}")
+            print(f"   cliente_id:  {venta.cliente_id}")
+            print(f"   usuario_id:  {cliente_obj.usuario_id}")
+            print(f"   monto_total: ${venta.monto_total:.2f}")
+            
             # Construir detalle de productos (asumiendo que venta tiene relación con detalle)
             detalle_texto = ", ".join([
                 f"{item.cantidad}x {item.producto.nombre}"
                 for item in venta.detalle  # Asegúrate que venta.detalle exista
             ])
 
-            enviar_notificacion(
+            resultado = enviar_notificacion(
                 db         = db,
                 usuario_id = cliente_obj.usuario_id,
                 titulo     = "🫓 Nueva compra registrada",
@@ -57,6 +64,17 @@ def crear_venta(
                     "monto":     str(venta.monto_total),
                 },
             )
+            print(f"   Resultado FCM: {resultado}")
+            print(f"{'='*50}\n")
+        else:
+            print(f"\n{'='*50}")
+            print(f"❌ [VENTAS] No se envio notificacion:")
+            print(f"   venta_id:    {venta.id}")
+            print(f"   cliente_id:  {venta.cliente_id}")
+            print(f"   cliente_obj: {cliente_obj}")
+            print(f"   usuario_id:  {cliente_obj.usuario_id if cliente_obj else 'N/A'}")
+            print(f"   motivo:      {'Cliente no encontrado' if not cliente_obj else 'Cliente sin usuario_id'}")
+            print(f"{'='*50}\n")
     # ======================================================
 
     return VentaOutput(
