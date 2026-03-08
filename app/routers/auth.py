@@ -154,3 +154,20 @@ def registro_cliente(
         "usuario": datos.nombre_usuario,
         "nombre":  datos.nombre,
     }
+    
+@router.get("/empresas-publico")
+def listar_empresas_publico(
+    buscar: Optional[str] = None,
+    db:     Session       = Depends(get_db)
+):
+    from app.models.empresa import Empresa
+    query = db.query(Empresa).filter(Empresa.esta_activa == True)
+    if buscar:
+        query = query.filter(
+            Empresa.nombre.ilike(f"%{buscar}%")
+        )
+    empresas = query.order_by(Empresa.nombre).all()
+    return [
+        {"id": str(e.id), "nombre": e.nombre}
+        for e in empresas
+    ]
