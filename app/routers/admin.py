@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+# app/routers/admin.py
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from uuid import UUID
@@ -10,8 +11,48 @@ from app.models.empresa import Empresa
 from app.models.producto import Producto
 from app.core.dependencies import requiere_admin
 from app.core.security import hashear_contrasena
+import os
+import uuid as uuid_lib
 
 router = APIRouter(prefix="/admin", tags=["Administrador"])
+
+
+# Ruta absoluta: sube un nivel desde /app/routers/ hasta la raíz del proyecto
+
+BASE_DIR   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+UPLOAD_DIR = os.path.join(BASE_DIR, "static", "productos")
+ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_SIZE_MB  = 5
+
+
+# ── Helpers imágenes ──────────────────────────────────────
+def _guardar_imagen(archivo: UploadFile) -> str:
+    ext = os.path.splitext(archivo.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato no permitido. Usa: {', '.join(ALLOWED_EXTS)}"
+        )
+    contenido = archivo.file.read()
+    if len(contenido) > MAX_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La imagen no puede superar {MAX_SIZE_MB}MB"
+        )
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    nombre_archivo = f"{uuid_lib.uuid4()}{ext}"
+    with open(os.path.join(UPLOAD_DIR, nombre_archivo), "wb") as f:
+        f.write(contenido)
+    return nombre_archivo
+
+
+def _eliminar_imagen(imagen_url: Optional[str]) -> None:
+    if not imagen_url:
+        return
+    nombre = imagen_url.split("/")[-1]
+    ruta   = os.path.join(UPLOAD_DIR, nombre)
+    if os.path.exists(ruta):
+        os.remove(ruta)
 
 
 # ═══════════════════════════════════════
@@ -35,10 +76,10 @@ class VendedorOutput(BaseModel):
     model_config = {"from_attributes": True}
 
 class VendedorEditar(BaseModel):
-    nombre_completo: Optional[str] = None
-    telefono:        Optional[str] = None
-    esta_activo:     Optional[bool] = None
-    nueva_contrasena: Optional[str] = None
+    nombre_completo:  Optional[str]  = None
+    telefono:         Optional[str]  = None
+    esta_activo:      Optional[bool] = None
+    nueva_contrasena: Optional[str]  = None
 
 
 @router.get("/vendedores", response_model=List[VendedorOutput])
@@ -65,7 +106,6 @@ def crear_vendedor(
     db:      Session = Depends(get_db),
     usuario: Usuario = Depends(requiere_admin)
 ):
-    # Verificar usuario único
     existe = db.query(Usuario).filter(
         Usuario.nombre_usuario == datos.nombre_usuario
     ).first()
@@ -75,7 +115,6 @@ def crear_vendedor(
             detail=f"El usuario '{datos.nombre_usuario}' ya existe."
         )
 
-    # Crear usuario
     nuevo_usuario = Usuario(
         nombre_usuario  = datos.nombre_usuario,
         correo          = datos.correo,
@@ -85,7 +124,6 @@ def crear_vendedor(
     db.add(nuevo_usuario)
     db.flush()
 
-    # Crear vendedor
     vendedor = Vendedor(
         usuario_id      = nuevo_usuario.id,
         nombre_completo = datos.nombre_completo,
@@ -112,9 +150,13 @@ def editar_vendedor(
     db:          Session = Depends(get_db),
     usuario:     Usuario = Depends(requiere_admin)
 ):
-    vendedor = db.query(Vendedor).filter(Vendedor.id == vendedor_id).first()
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.id == vendedor_id
+    ).first()
     if not vendedor:
-        raise HTTPException(status_code=404, detail="Vendedor no encontrado.")
+        raise HTTPException(
+            status_code=404, detail="Vendedor no encontrado."
+        )
 
     if datos.nombre_completo is not None:
         vendedor.nombre_completo = datos.nombre_completo
@@ -123,7 +165,6 @@ def editar_vendedor(
     if datos.esta_activo is not None:
         vendedor.esta_activo         = datos.esta_activo
         vendedor.usuario.esta_activo = datos.esta_activo
-
     if datos.nueva_contrasena:
         vendedor.usuario.contrasena_hash = hashear_contrasena(
             datos.nueva_contrasena
@@ -152,17 +193,17 @@ class EmpresaCrear(BaseModel):
     telefono:  Optional[str] = None
 
 class EmpresaOutput(BaseModel):
-    id:         UUID
-    nombre:     str
-    direccion:  Optional[str] = None
-    telefono:   Optional[str] = None
+    id:          UUID
+    nombre:      str
+    direccion:   Optional[str] = None
+    telefono:    Optional[str] = None
     esta_activa: bool
     model_config = {"from_attributes": True}
 
 class EmpresaEditar(BaseModel):
-    nombre:     Optional[str] = None
-    direccion:  Optional[str] = None
-    telefono:   Optional[str] = None
+    nombre:      Optional[str]  = None
+    direccion:   Optional[str]  = None
+    telefono:    Optional[str]  = None
     esta_activa: Optional[bool] = None
 
 
@@ -194,9 +235,13 @@ def editar_empresa(
     db:         Session = Depends(get_db),
     usuario:    Usuario = Depends(requiere_admin)
 ):
-    empresa = db.query(Empresa).filter(Empresa.id == empresa_id).first()
+    empresa = db.query(Empresa).filter(
+        Empresa.id == empresa_id
+    ).first()
     if not empresa:
-        raise HTTPException(status_code=404, detail="Empresa no encontrada.")
+        raise HTTPException(
+            status_code=404, detail="Empresa no encontrada."
+        )
 
     if datos.nombre      is not None: empresa.nombre      = datos.nombre
     if datos.direccion   is not None: empresa.direccion   = datos.direccion
@@ -221,6 +266,7 @@ class ProductoOutput(BaseModel):
     nombre:      str
     precio:      float
     esta_activo: bool
+    imagen_url:  Optional[str] = None
     model_config = {"from_attributes": True}
 
 class ProductoEditar(BaseModel):
@@ -261,9 +307,13 @@ def editar_producto(
     db:          Session = Depends(get_db),
     usuario:     Usuario = Depends(requiere_admin)
 ):
-    producto = db.query(Producto).filter(Producto.id == producto_id).first()
+    producto = db.query(Producto).filter(
+        Producto.id == producto_id
+    ).first()
     if not producto:
-        raise HTTPException(status_code=404, detail="Producto no encontrado.")
+        raise HTTPException(
+            status_code=404, detail="Producto no encontrado."
+        )
 
     if datos.nombre      is not None: producto.nombre      = datos.nombre
     if datos.precio      is not None: producto.precio      = datos.precio
@@ -273,6 +323,71 @@ def editar_producto(
     db.refresh(producto)
     return producto
 
+
+@router.post("/productos/{producto_id}/imagen",
+             response_model=ProductoOutput)
+def subir_imagen_producto(
+    producto_id: UUID,
+    imagen:      UploadFile = File(...),
+    db:          Session    = Depends(get_db),
+    usuario:     Usuario    = Depends(requiere_admin)
+):
+    producto = db.query(Producto).filter(
+        Producto.id == producto_id
+    ).first()
+    if not producto:
+        raise HTTPException(
+            status_code=404, detail="Producto no encontrado."
+        )
+
+    _eliminar_imagen(producto.imagen_url)
+
+    nombre_archivo      = _guardar_imagen(imagen)
+    producto.imagen_url = f"/static/productos/{nombre_archivo}"
+
+    db.commit()
+    db.refresh(producto)
+    return producto
+
+
+@router.delete("/productos/{producto_id}/imagen")
+def eliminar_imagen_producto(
+    producto_id: UUID,
+    db:          Session = Depends(get_db),
+    usuario:     Usuario = Depends(requiere_admin)
+):
+    producto = db.query(Producto).filter(
+        Producto.id == producto_id
+    ).first()
+    if not producto:
+        raise HTTPException(
+            status_code=404, detail="Producto no encontrado."
+        )
+
+    _eliminar_imagen(producto.imagen_url)
+    producto.imagen_url = None
+    db.commit()
+
+    return {"mensaje": "Imagen eliminada correctamente"}
+
+
+@router.delete("/productos/{producto_id}")
+def eliminar_producto(
+    producto_id: UUID,
+    db:          Session = Depends(get_db),
+    usuario:     Usuario = Depends(requiere_admin)
+):
+    producto = db.query(Producto).filter(
+        Producto.id == producto_id
+    ).first()
+    if not producto:
+        raise HTTPException(
+            status_code=404, detail="Producto no encontrado."
+        )
+    _eliminar_imagen(producto.imagen_url)
+    db.delete(producto)
+    db.commit()
+    return {"mensaje": "Producto eliminado correctamente"}
 
 # ═══════════════════════════════════════
 #  REPORTE GENERAL
@@ -284,19 +399,29 @@ def resumen_general(
     usuario: Usuario = Depends(requiere_admin)
 ):
     from sqlalchemy import text
-    deudas    = db.execute(
-        text("SELECT COUNT(*) as clientes, COALESCE(SUM(saldo_actual),0) as total FROM vista_deudas_clientes")
+
+    deudas = db.execute(
+        text("""
+            SELECT COUNT(*) as clientes,
+                   COALESCE(SUM(saldo_actual), 0) as total
+            FROM vista_deudas_clientes
+        """)
     ).mappings().first()
+
     vendedores_activos = db.query(Vendedor).filter(
         Vendedor.esta_activo == True
     ).count()
+
     ventas_hoy = db.execute(
-        text("SELECT COALESCE(SUM(total_vendido),0) as hoy FROM vista_ventas_hoy")
+        text("""
+            SELECT COALESCE(SUM(total_vendido), 0) as hoy
+            FROM vista_ventas_hoy
+        """)
     ).mappings().first()
 
     return {
-        "total_deudas":        float(deudas["total"]),
-        "clientes_con_deuda":  int(deudas["clientes"]),
-        "vendedores_activos":  vendedores_activos,
-        "vendido_hoy":         float(ventas_hoy["hoy"]),
+        "total_deudas":       float(deudas["total"]),
+        "clientes_con_deuda": int(deudas["clientes"]),
+        "vendedores_activos": vendedores_activos,
+        "vendido_hoy":        float(ventas_hoy["hoy"]),
     }

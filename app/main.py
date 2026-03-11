@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles 
 from app.routers import notificaciones
+import os
 from app.routers import admin, auth, ventas, clientes, reportes, productos, pagos, vendedores
 
 app = FastAPI(
@@ -18,6 +20,11 @@ app.add_middleware(
     allow_methods     = ["*"],
     allow_headers     = ["*"],
 )
+BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR  = os.path.join(BASE_DIR, "static")
+
+os.makedirs(os.path.join(STATIC_DIR, "productos"), exist_ok=True)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Registrar todos los routers
 app.include_router(auth.router)
