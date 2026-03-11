@@ -171,3 +171,10 @@ def listar_empresas_publico(
         {"id": str(e.id), "nombre": e.nombre}
         for e in empresas
     ]
+@router.get("/verificar-cedula/{cedula}")
+def verificar_cedula(cedula: str, db: Session = Depends(get_db)):
+    from app.models.cliente import Cliente
+    existe = db.query(Cliente).filter(
+        Cliente.cedula == cedula
+    ).first()
+    return {"disponible": existe is None}
