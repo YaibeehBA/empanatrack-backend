@@ -2,5 +2,5 @@ venv/
 .env
 __pycache__/
 *.pyc
-firebase_credentials.json
+echo "firebase_credentials.json" >> .gitignore
 static
