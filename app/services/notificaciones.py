@@ -9,11 +9,10 @@ from sqlalchemy.orm import Session
 from app.models.fcm_token import FcmToken
 
 # ── Configuración ────────────────────────────────────────
-# Ruta al archivo de credenciales descargado de Firebase Console
-CREDENTIALS_PATH = os.getenv(
-    "FIREBASE_CREDENTIALS_PATH",
-    "firebase_credentials.json"   # por defecto en la raíz del proyecto
-)
+# Local: usa el archivo físico
+# Railway: usa la variable de entorno FIREBASE_CREDENTIALS con el JSON completo
+CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
+FIREBASE_CREDENTIALS_JSON = os.getenv("FIREBASE_CREDENTIALS")
 
 # ID del proyecto Firebase (lo encuentras en el .json como "project_id")
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
@@ -23,10 +22,17 @@ FCM_SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"]
 
 def _get_access_token() -> str:
     """Genera un token OAuth2 temporal para autenticarse con FCM v1."""
-    credentials = google.oauth2.service_account.Credentials.from_service_account_file(
-        CREDENTIALS_PATH,
-        scopes=FCM_SCOPES,
-    )
+    if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
+        credentials = google.oauth2.service_account.Credentials.from_service_account_file(
+            CREDENTIALS_PATH,
+            scopes=FCM_SCOPES,
+        )
+    else:
+        creds_dict = json.loads(FIREBASE_CREDENTIALS_JSON)
+        credentials = google.oauth2.service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=FCM_SCOPES,
+        )
     request = google.auth.transport.requests.Request()
     credentials.refresh(request)
     return credentials.token
@@ -43,7 +49,13 @@ def enviar_notificacion(
     print(f"\n  🔑 [FCM] usuario_id={usuario_id}")
 
     # ── Verificar credenciales ───────────────────────────
-    if not os.path.exists(CREDENTIALS_PATH):
+    if not CREDENTIALS_PATH and not FIREBASE_CREDENTIALS_JSON:
+        print(f"  ❌ [FCM] No hay credenciales Firebase configuradas")
+        print(f"       Local: define FIREBASE_CREDENTIALS_PATH en .env")
+        print(f"       Railway: define FIREBASE_CREDENTIALS con el JSON completo")
+        return False
+
+    if CREDENTIALS_PATH and not os.path.exists(CREDENTIALS_PATH):
         print(f"  ❌ [FCM] No se encontro: {CREDENTIALS_PATH}")
         print(f"       Descarga el JSON desde Firebase Console")
         print(f"       → Configuracion del proyecto → Cuentas de servicio")
@@ -73,9 +85,12 @@ def enviar_notificacion(
     project_id = FIREBASE_PROJECT_ID
     if not project_id:
         try:
-            with open(CREDENTIALS_PATH) as f:
-                creds_data = json.load(f)
-                project_id = creds_data.get("project_id", "")
+            if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
+                with open(CREDENTIALS_PATH) as f:
+                    creds_data = json.load(f)
+            else:
+                creds_data = json.loads(FIREBASE_CREDENTIALS_JSON)
+            project_id = creds_data.get("project_id", "")
         except Exception:
             pass
 
@@ -155,7 +170,7 @@ def enviar_notificacion(
             db.commit()
         elif response.status_code == 401:
             print(f"  ❌ [FCM] 401 — OAuth2 token invalido")
-            print(f"       Verifica que firebase_credentials.json es correcto")
+            print(f"       Verifica que las credenciales Firebase son correctas")
         elif response.status_code == 400:
             print(f"  ❌ [FCM] 400 — Payload malformado: {error_code}")
         else:
