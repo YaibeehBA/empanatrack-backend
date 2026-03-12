@@ -3,4 +3,4 @@ venv/
 __pycache__/
 *.pyc
 static
-"firebase_credentials.json" 
+firebase_credentials.json
