@@ -1,7 +1,7 @@
-from sqlalchemy import Column, String, Boolean
+import uuid
+from sqlalchemy import Column, String, Boolean, DECIMAL
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-import uuid
 from app.database import Base
 
 class Empresa(Base):
@@ -12,6 +12,7 @@ class Empresa(Base):
     direccion   = Column(String(500), nullable=True)
     telefono    = Column(String(20),  nullable=True)
     esta_activa = Column(Boolean, default=True, nullable=False)
+    latitud     = Column(DECIMAL(10, 8), nullable=True)   
+    longitud    = Column(DECIMAL(11, 8), nullable=True)   
 
-    # Relaciones
     clientes    = relationship("Cliente", back_populates="empresa")

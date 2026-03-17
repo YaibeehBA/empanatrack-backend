@@ -16,6 +16,6 @@ class Vendedor(Base):
 
     # Relaciones
     usuario         = relationship("Usuario",  back_populates="vendedor")
-    rutas           = relationship("Ruta", back_populates="vendedor")
     ventas          = relationship("Venta",    back_populates="vendedor")
     pagos           = relationship("Pago",     back_populates="vendedor")
+    rutas           = relationship("RutaAsignacion", back_populates="vendedor")

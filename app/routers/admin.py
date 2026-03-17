@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Optional, List
+from pydantic import BaseModel, validator
 from uuid import UUID
 from pydantic import BaseModel
 from app.database import get_db
@@ -13,6 +14,8 @@ from app.core.dependencies import requiere_admin
 from app.core.security import hashear_contrasena
 import os
 import uuid as uuid_lib
+
+from app.utils.validators import validar_coordenada_latitud, validar_coordenada_longitud, validar_telefono_ecuador
 
 router = APIRouter(prefix="/admin", tags=["Administrador"])
 
@@ -182,30 +185,122 @@ def editar_vendedor(
         esta_activo     = vendedor.esta_activo,
     )
 
+@router.delete("/vendedores/{vendedor_id}")
+def eliminar_vendedor(
+    vendedor_id: UUID,
+    db:          Session = Depends(get_db),
+    usuario:     Usuario = Depends(requiere_admin)
+):
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.id == vendedor_id
+    ).first()
+    if not vendedor:
+        raise HTTPException(
+            status_code=404, detail="Vendedor no encontrado.")
+
+    # Verificar que no tenga ventas registradas
+    from app.models.venta import Venta
+    tiene_ventas = db.query(Venta).filter(
+        Venta.vendedor_id == vendedor_id
+    ).first()
+    if tiene_ventas:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar: el vendedor tiene ventas registradas. "
+                   "Desactívalo en su lugar.")
+
+    # Eliminar usuario asociado también
+    usuario_vendedor = vendedor.usuario
+    db.delete(vendedor)
+    if usuario_vendedor:
+        db.delete(usuario_vendedor)
+    db.commit()
+    return {"mensaje": "Vendedor eliminado correctamente."}
+
 
 # ═══════════════════════════════════════
 #  EMPRESAS
 # ═══════════════════════════════════════
-
 class EmpresaCrear(BaseModel):
     nombre:    str
-    direccion: Optional[str] = None
-    telefono:  Optional[str] = None
+    direccion: Optional[str]   = None
+    telefono:  Optional[str]   = None
+    latitud:   Optional[float] = None
+    longitud:  Optional[float] = None
+
+    @validator('nombre')
+    def nombre_valido(cls, v):
+        if not v or not v.strip():
+            raise ValueError('El nombre es obligatorio')
+        if len(v.strip()) < 2:
+            raise ValueError('El nombre debe tener al menos 2 caracteres')
+        return v.strip()
+
+    @validator('telefono')
+    def telefono_valido(cls, v):
+        if v and v.strip():
+            return validar_telefono_ecuador(v.strip())
+        return v
+
+    @validator('latitud')
+    def latitud_valida(cls, v):
+        if v is not None:
+            return validar_coordenada_latitud(v)
+        return v
+
+    @validator('longitud')
+    def longitud_valida(cls, v):
+        if v is not None:
+            return validar_coordenada_longitud(v)
+        return v
+
 
 class EmpresaOutput(BaseModel):
     id:          UUID
     nombre:      str
-    direccion:   Optional[str] = None
-    telefono:    Optional[str] = None
+    direccion:   Optional[str]   = None
+    telefono:    Optional[str]   = None
     esta_activa: bool
+    latitud:     Optional[float] = None
+    longitud:    Optional[float] = None
     model_config = {"from_attributes": True}
 
-class EmpresaEditar(BaseModel):
-    nombre:      Optional[str]  = None
-    direccion:   Optional[str]  = None
-    telefono:    Optional[str]  = None
-    esta_activa: Optional[bool] = None
 
+class EmpresaEditar(BaseModel):
+    nombre:      Optional[str]   = None
+    direccion:   Optional[str]   = None
+    telefono:    Optional[str]   = None
+    esta_activa: Optional[bool]  = None
+    latitud:     Optional[float] = None
+    longitud:    Optional[float] = None
+
+    @validator('nombre')
+    def nombre_valido(cls, v):
+        if v is not None:
+            if not v.strip():
+                raise ValueError('El nombre no puede estar vacío')
+            if len(v.strip()) < 2:
+                raise ValueError('El nombre debe tener al menos 2 caracteres')
+            return v.strip()
+        return v
+
+    @validator('telefono')
+    def telefono_valido(cls, v):
+        if v and v.strip():
+            return validar_telefono_ecuador(v.strip())
+        return v
+
+    @validator('latitud')
+    def latitud_valida(cls, v):
+        if v is not None:
+            return validar_coordenada_latitud(v)
+        return v
+
+    @validator('longitud')
+    def longitud_valida(cls, v):
+        if v is not None:
+            return validar_coordenada_longitud(v)
+        return v
 
 @router.get("/empresas", response_model=List[EmpresaOutput])
 def listar_empresas(
@@ -247,10 +342,41 @@ def editar_empresa(
     if datos.direccion   is not None: empresa.direccion   = datos.direccion
     if datos.telefono    is not None: empresa.telefono    = datos.telefono
     if datos.esta_activa is not None: empresa.esta_activa = datos.esta_activa
+    if datos.latitud     is not None: empresa.latitud     = datos.latitud  
+    if datos.longitud    is not None: empresa.longitud    = datos.longitud 
 
     db.commit()
     db.refresh(empresa)
     return empresa
+
+
+@router.delete("/empresas/{empresa_id}")
+def eliminar_empresa(
+    empresa_id: UUID,
+    db:         Session = Depends(get_db),
+    usuario:    Usuario = Depends(requiere_admin)
+):
+    empresa = db.query(Empresa).filter(
+        Empresa.id == empresa_id
+    ).first()
+    if not empresa:
+        raise HTTPException(
+            status_code=404, detail="Empresa no encontrada.")
+
+    # Verificar que no tenga clientes asociados
+    from app.models.cliente import Cliente
+    tiene_clientes = db.query(Cliente).filter(
+        Cliente.empresa_id == empresa_id
+    ).first()
+    if tiene_clientes:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar: la empresa tiene clientes asociados. "
+                   "Desactívala en su lugar.")
+
+    db.delete(empresa)
+    db.commit()
+    return {"mensaje": "Empresa eliminada correctamente."}
 
 
 # ═══════════════════════════════════════

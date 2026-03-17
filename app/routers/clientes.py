@@ -1,33 +1,75 @@
 from decimal import Decimal
+from typing  import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-from typing import List
-from uuid import UUID
-from app.core.security import hashear_contrasena
-from app.database import get_db
-from app.models.cliente import Cliente
-from app.models.empresa import Empresa
-from app.models.usuario import Usuario
+from fastapi             import APIRouter, Depends, HTTPException, Query
+from sqlalchemy          import or_
+from sqlalchemy.orm      import Session
+from sqlalchemy          import text
+from uuid                import UUID
+from app.core.security   import hashear_contrasena
+from app.database        import get_db
+from app.models.cliente  import Cliente
+from app.models.empresa  import Empresa
+from app.models.usuario  import Usuario
 from app.models.vendedor import Vendedor
-from app.schemas.cliente import ClienteCrear, ClienteCrearCompleto, ClienteCrearOutput, ClienteOutput
+from app.schemas.cliente import (
+    ClienteCrear, ClienteCrearCompleto,
+    ClienteCrearOutput, ClienteOutput,
+)
 from app.services.venta_service import obtener_saldo_cliente
-from app.core.dependencies import get_usuario_actual, requiere_admin, requiere_vendedor
+from app.core.dependencies      import (
+    get_usuario_actual, requiere_admin, requiere_vendedor,
+)
 
 router = APIRouter(prefix="/clientes", tags=["Clientes"])
 
-@router.get("/", response_model=List[ClienteOutput])
+
+# ══════════════════════════════════════════════════════════
+#  HELPER
+# ══════════════════════════════════════════════════════════
+def obtener_saldo_vendedor_cliente(
+    db:          Session,
+    cliente_id:  UUID,
+    vendedor_id: UUID,
+) -> Decimal:
+    resultado = db.execute(
+        text("SELECT calcular_saldo_cliente_vendedor(:cid, :vid)"),
+        {"cid": str(cliente_id), "vid": str(vendedor_id)},
+    ).scalar()
+    return Decimal(str(resultado or 0))
+
+
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/
+# ══════════════════════════════════════════════════════════
+@router.get("/")
 def listar_clientes(
-    db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(get_usuario_actual)
+    pagina:     int           = Query(default=1,  ge=1),
+    por_pagina: int           = Query(default=20, ge=1, le=100),
+    buscar:     Optional[str] = Query(default=None),
+    db:         Session       = Depends(get_db),
+    usuario:    Usuario       = Depends(get_usuario_actual),
 ):
-    # Admin ve todos
+    query = db.query(Cliente).filter(Cliente.esta_activo == True)
+
+    if buscar and buscar.strip():
+        termino = f"%{buscar.strip()}%"
+        query = query.filter(
+            or_(
+                Cliente.nombre.ilike(termino),
+                Cliente.cedula.ilike(termino),
+            )
+        )
+
+    clientes = (
+        query.order_by(Cliente.nombre)
+        .offset((pagina - 1) * por_pagina)
+        .limit(por_pagina)
+        .all()
+    )
+
     if usuario.rol == "administrador":
-        clientes = db.query(Cliente).filter(
-            Cliente.esta_activo == True
-        ).order_by(Cliente.nombre).all()
-        return [
+        resultado = [
             ClienteOutput(
                 id           = c.id,
                 cedula       = c.cedula,
@@ -36,127 +78,137 @@ def listar_clientes(
                 telefono     = c.telefono,
                 empresa      = c.empresa.nombre if c.empresa else None,
                 saldo_actual = float(obtener_saldo_cliente(db, c.id)),
-            ) for c in clientes
+            )
+            for c in clientes
+        ]
+    else:
+        vendedor = db.query(Vendedor).filter(
+            Vendedor.usuario_id == usuario.id
+        ).first()
+        if not vendedor:
+            return {"clientes": [], "pagina": pagina,
+                    "por_pagina": por_pagina}
+
+        resultado = [
+            ClienteOutput(
+                id           = c.id,
+                cedula       = c.cedula,
+                nombre       = c.nombre,
+                correo       = c.correo,
+                telefono     = c.telefono,
+                empresa      = c.empresa.nombre if c.empresa else None,
+                saldo_actual = float(obtener_saldo_vendedor_cliente(
+                    db, c.id, vendedor.id
+                )),
+            )
+            for c in clientes
         ]
 
-    # Vendedor ve TODOS los clientes activos
-    # (para poder venderles), pero la deuda es solo la suya
-    vendedor = db.query(Vendedor).filter(
-        Vendedor.usuario_id == usuario.id
-    ).first()
-    if not vendedor:
-        return []
+    return {
+        "clientes":   resultado,
+        "pagina":     pagina,
+        "por_pagina": por_pagina,
+    }
 
-    clientes = db.query(Cliente).filter(
-        Cliente.esta_activo == True
-    ).order_by(Cliente.nombre).all()
 
-    return [
-        ClienteOutput(
-            id           = c.id,
-            cedula       = c.cedula,
-            nombre       = c.nombre,
-            correo       = c.correo,
-            telefono     = c.telefono,
-            empresa      = c.empresa.nombre if c.empresa else None,
-            # Deuda solo con este vendedor
-            saldo_actual = float(obtener_saldo_vendedor_cliente(
-                db, c.id, vendedor.id
-            )),
-        ) for c in clientes
-    ]
-def obtener_saldo_vendedor_cliente(
-    db:          Session,
-    cliente_id:  UUID,
-    vendedor_id: UUID
-) -> Decimal:
-    """Usa la función PostgreSQL para calcular saldo por vendedor."""
-    from sqlalchemy import text
-    resultado = db.execute(
-        text("SELECT calcular_saldo_cliente_vendedor(:cid, :vid)"),
-        {
-            "cid": str(cliente_id),
-            "vid": str(vendedor_id),
-        }
-    ).scalar()
-    return Decimal(str(resultado or 0))
-
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/mi-perfil
+# ══════════════════════════════════════════════════════════
 @router.get("/mi-perfil")
 def mi_perfil(
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(get_usuario_actual)
+    usuario: Usuario = Depends(get_usuario_actual),
 ):
     if usuario.rol != "cliente":
-        raise HTTPException(status_code=403,
-                            detail="Solo clientes pueden usar este endpoint.")
+        raise HTTPException(
+            status_code=403,
+            detail="Solo clientes pueden usar este endpoint.",
+        )
     cliente = db.query(Cliente).filter(
-        Cliente.usuario_id == usuario.id,
-        Cliente.esta_activo == True
+        Cliente.usuario_id  == usuario.id,
+        Cliente.esta_activo == True,
     ).first()
     if not cliente:
-        raise HTTPException(status_code=404, detail="Perfil no encontrado.")
-
+        raise HTTPException(status_code=404,
+                            detail="Perfil no encontrado.")
     return {
         "id":     str(cliente.id),
         "nombre": cliente.nombre,
         "cedula": cliente.cedula,
     }
 
-@router.get("/{cliente_id}/saldo")
-def obtener_saldo(
-    cliente_id: UUID,
-    db:         Session = Depends(get_db),
-    usuario:    Usuario = Depends(get_usuario_actual)
+
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/empresas/lista
+# ══════════════════════════════════════════════════════════
+@router.get("/empresas/lista")
+def listar_empresas(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor),
 ):
-    # Si es cliente, solo puede ver su propio saldo
-    if usuario.rol == "cliente":
-        if not usuario.cliente or usuario.cliente.id != cliente_id:
-            raise HTTPException(status_code=403, detail="Solo puedes ver tu propio saldo.")
+    empresas = db.query(Empresa).filter(
+        Empresa.esta_activa == True
+    ).order_by(Empresa.nombre).all()
+    return [
+        {"id": str(e.id), "nombre": e.nombre,
+         "direccion": e.direccion}
+        for e in empresas
+    ]
 
-    saldo = obtener_saldo_cliente(db, cliente_id)
-    return {"cliente_id": cliente_id, "saldo_actual": float(saldo)}
+
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/verificar-cedula/{cedula}
+# ══════════════════════════════════════════════════════════
+@router.get("/verificar-cedula/{cedula}")
+def verificar_cedula_autenticado(
+    cedula:  str,
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor),
+):
+    existe = db.query(Cliente).filter(
+        Cliente.cedula == cedula
+    ).first()
+    return {"disponible": existe is None}
 
 
+# ══════════════════════════════════════════════════════════
+#  POST /clientes/
+# ══════════════════════════════════════════════════════════
 @router.post("/", response_model=ClienteCrearOutput)
 def crear_cliente(
     datos:   ClienteCrearCompleto,
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_vendedor)   # Vendedor o admin pueden crear
+    usuario: Usuario = Depends(requiere_vendedor),
 ):
-    # Verificar que la cédula no exista
-    existe = db.query(Cliente).filter(
+    # Cédula única
+    if db.query(Cliente).filter(
         Cliente.cedula == datos.cedula
-    ).first()
-    if existe:
+    ).first():
         raise HTTPException(
             status_code=400,
-            detail=f"Ya existe un cliente con cédula {datos.cedula}."
+            detail=f"Ya existe un cliente con cédula {datos.cedula}.",
         )
 
-    # Verificar correo único si se proporcionó
+    # Correo único
     if datos.correo:
-        correo_existe = db.query(Cliente).filter(
+        if db.query(Cliente).filter(
             Cliente.correo == datos.correo
-        ).first()
-        if correo_existe:
+        ).first():
             raise HTTPException(
                 status_code=400,
-                detail="El correo ya está registrado."
+                detail="El correo ya está registrado.",
             )
 
-    # Crear usuario de app si se proporcionaron credenciales
+    # Usuario app
     usuario_app = None
     if datos.nombre_usuario and datos.contrasena:
-        # Verificar que el nombre de usuario no exista
-        user_existe = db.query(Usuario).filter(
+        if db.query(Usuario).filter(
             Usuario.nombre_usuario == datos.nombre_usuario
-        ).first()
-        if user_existe:
+        ).first():
             raise HTTPException(
                 status_code=400,
-                detail=f"El usuario '{datos.nombre_usuario}' ya existe."
+                detail=f"El usuario '{datos.nombre_usuario}' ya existe.",
             )
-
         usuario_app = Usuario(
             nombre_usuario  = datos.nombre_usuario,
             correo          = datos.correo,
@@ -164,9 +216,8 @@ def crear_cliente(
             rol             = "cliente",
         )
         db.add(usuario_app)
-        db.flush()  # Para obtener el id antes del commit
+        db.flush()
 
-    # Crear el cliente
     cliente = Cliente(
         usuario_id = usuario_app.id if usuario_app else None,
         empresa_id = datos.empresa_id,
@@ -179,7 +230,6 @@ def crear_cliente(
     db.commit()
     db.refresh(cliente)
 
-    # Obtener nombre empresa si existe
     empresa_nombre = None
     if cliente.empresa_id:
         empresa = db.query(Empresa).filter(
@@ -198,17 +248,43 @@ def crear_cliente(
     )
 
 
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/{cliente_id}/saldo
+# ══════════════════════════════════════════════════════════
+@router.get("/{cliente_id}/saldo")
+def obtener_saldo(
+    cliente_id: UUID,
+    db:         Session = Depends(get_db),
+    usuario:    Usuario = Depends(get_usuario_actual),
+):
+    if usuario.rol == "cliente":
+        if not usuario.cliente or \
+                usuario.cliente.id != cliente_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Solo puedes ver tu propio saldo.",
+            )
+    saldo = obtener_saldo_cliente(db, cliente_id)
+    return {"cliente_id": cliente_id,
+            "saldo_actual": float(saldo)}
+
+
+# ══════════════════════════════════════════════════════════
+#  GET /clientes/{cliente_id}/historial
+# ══════════════════════════════════════════════════════════
 @router.get("/{cliente_id}/historial")
 def historial_cliente(
     cliente_id: UUID,
     db:         Session = Depends(get_db),
-    usuario:    Usuario = Depends(get_usuario_actual)
+    usuario:    Usuario = Depends(get_usuario_actual),
 ):
-    # El cliente solo puede ver su propio historial
     if usuario.rol == "cliente":
-        if not usuario.cliente or str(usuario.cliente.id) != str(cliente_id):
-            raise HTTPException(status_code=403,
-                                detail="Solo puedes ver tu propio historial.")
+        if not usuario.cliente or \
+                str(usuario.cliente.id) != str(cliente_id):
+            raise HTTPException(
+                status_code=403,
+                detail="Solo puedes ver tu propio historial.",
+            )
 
     resultado = db.execute(
         text("""
@@ -216,19 +292,43 @@ def historial_cliente(
             WHERE cliente_id = :cid
             ORDER BY fecha DESC
         """),
-        {"cid": str(cliente_id)}
+        {"cid": str(cliente_id)},
     ).mappings().all()
 
     return [dict(r) for r in resultado]
 
-
-@router.get("/empresas/lista")
-def listar_empresas(
-    db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_vendedor)
+@router.delete("/{cliente_id}")
+def eliminar_cliente(
+    cliente_id: UUID,
+    db:         Session = Depends(get_db),
+    usuario:    Usuario = Depends(requiere_admin),
 ):
-    empresas = db.query(Empresa).filter(
-        Empresa.esta_activa == True
-    ).order_by(Empresa.nombre).all()
-    return [{"id": str(e.id), "nombre": e.nombre, "direccion": e.direccion}
-            for e in empresas]
+    cliente = db.query(Cliente).filter(
+        Cliente.id == cliente_id
+    ).first()
+    if not cliente:
+        raise HTTPException(
+            status_code=404, detail="Cliente no encontrado.")
+
+    # Verificar que no tenga ventas
+    from sqlalchemy import text
+    tiene_ventas = db.execute(
+        text("SELECT 1 FROM ventas WHERE cliente_id = :cid LIMIT 1"),
+        {"cid": str(cliente_id)}
+    ).first()
+    if tiene_ventas:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar: el cliente tiene ventas registradas.")
+
+    # Eliminar usuario app si tiene
+    if cliente.usuario_id:
+        usr = db.query(Usuario).filter(
+            Usuario.id == cliente.usuario_id
+        ).first()
+        if usr:
+            db.delete(usr)
+
+    db.delete(cliente)
+    db.commit()
+    return {"mensaje": "Cliente eliminado correctamente."}

@@ -25,11 +25,9 @@ def get_usuario_actual(
     )
     
     try:
-        # ✅ Extraer el string del objeto
-        token_string = token_data.credentials
-        print(f"🔍 Token recibido: {token_string[:50]}...")  # Debug
-        
-        payload = decodificar_token(token_string)  # ✅ Pasar el string
+       
+        token_string = token_data.credentials     
+        payload = decodificar_token(token_string)  
         usuario_id: str = payload.get("sub")
         
         if usuario_id is None:
