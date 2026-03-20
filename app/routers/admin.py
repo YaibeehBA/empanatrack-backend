@@ -322,6 +322,28 @@ def crear_empresa(
     db.refresh(empresa)
     return empresa
 
+# ── Schema ───────────────────────────────────────────────
+class ParseMapsUrl(BaseModel):
+    url: str
+
+
+# ── Endpoint ─────────────────────────────────────────────
+@router.post("/empresas/parsear-url-maps")
+def parsear_url_maps(
+    datos:   ParseMapsUrl,
+    usuario: Usuario = Depends(requiere_admin),
+):
+    from app.utils.maps_parser import parse_google_maps_url
+    try:
+        resultado = parse_google_maps_url(datos.url)
+        return {"ok": True, "data": resultado}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno procesando la URL."
+        )
 
 @router.put("/empresas/{empresa_id}", response_model=EmpresaOutput)
 def editar_empresa(
