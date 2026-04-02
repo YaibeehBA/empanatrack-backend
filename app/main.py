@@ -5,6 +5,8 @@ from app.routers import notificaciones
 from app.models import recuperacion_contrasena 
 import os
 from app.routers import admin, auth, ventas, clientes, reportes, productos, pagos, vendedores, rutas
+from app.routers import pedidos
+
 
 app = FastAPI(
     title       = "EmpanaTrack API",
@@ -38,6 +40,7 @@ app.include_router(admin.router)
 app.include_router(notificaciones.router)
 app.include_router(vendedores.router)
 app.include_router(rutas.router)
+app.include_router(pedidos.router)
 
 @app.get("/", tags=["Health"])
 def health_check():

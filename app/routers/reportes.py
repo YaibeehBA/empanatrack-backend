@@ -44,12 +44,14 @@ def resumen_vendedor(
 
     if not vendedor:
         return {
-            "total_ventas":   0,
-            "total_vendido":  0.0,
-            "total_fiado":    0.0,
-            "total_contado":  0.0,
-            "total_cobrado":  0.0,
-            "dinero_en_mano": 0.0,
+            "total_ventas":          0,
+            "total_vendido":         0.0,
+            "total_fiado":           0.0,
+            "total_contado":         0.0,
+            "total_cobrado":         0.0,
+            "pedidos_entregados":    0,
+            "total_pedidos_contado": 0.0,
+            "dinero_en_mano":        0.0,
         }
 
     hoy = date.today()
@@ -66,6 +68,7 @@ def resumen_vendedor(
         desde = hoy
         hasta = hoy
 
+    # ── Ventas tradicionales ──────────────────────────
     resultado = db.execute(
         text("""
             SELECT
@@ -87,21 +90,56 @@ def resumen_vendedor(
             WHERE vendedor_id       = :vid
               AND DATE(fecha_venta) BETWEEN :desde AND :hasta
         """),
-        {"vid": str(vendedor.id), "desde": str(desde), "hasta": str(hasta)},
+        {"vid": str(vendedor.id),
+         "desde": str(desde), "hasta": str(hasta)},
     ).mappings().first()
 
-    total_contado = float(resultado["total_contado"])
-    total_cobrado = float(resultado["total_cobrado"])
+    # ── Pedidos entregados por este vendedor ──────────
+    # Solo contraentrega cuenta como dinero en mano
+    # Los de transferencia ya fueron pagados antes
+    pedidos_res = db.execute(
+        text("""
+            SELECT
+                COUNT(*)                                  AS total_pedidos,
+                COALESCE(SUM(total), 0)                   AS total_monto,
+                COALESCE(SUM(
+                    CASE WHEN tipo_pago = 'contraentrega'
+                    THEN total ELSE 0 END), 0)            AS total_contraentrega,
+                COALESCE(SUM(
+                    CASE WHEN tipo_pago = 'transferencia'
+                    THEN total ELSE 0 END), 0)            AS total_transferencia
+            FROM pedidos
+            WHERE vendedor_id       = :vid
+              AND estado            = 'entregado'
+              AND DATE(aceptado_en) BETWEEN :desde AND :hasta
+        """),
+        {"vid": str(vendedor.id),
+         "desde": str(desde), "hasta": str(hasta)},
+    ).mappings().first()
+
+    total_contado         = float(resultado["total_contado"])
+    total_cobrado         = float(resultado["total_cobrado"])
+    total_contraentrega   = float(pedidos_res["total_contraentrega"])
+    total_transferencia   = float(pedidos_res["total_transferencia"])
+    pedidos_entregados    = int(pedidos_res["total_pedidos"])
+
+    # Dinero en mano = ventas contado + cobros + pedidos contraentrega
+    dinero_en_mano = total_contado + total_cobrado + total_contraentrega
 
     return {
-        "total_ventas":   int(resultado["total_ventas"]),
-        "total_vendido":  float(resultado["total_vendido"]),
-        "total_fiado":    float(resultado["total_fiado"]),
-        "total_contado":  total_contado,
-        "total_cobrado":  total_cobrado,
-        "dinero_en_mano": total_contado + total_cobrado,
+        # Ventas tradicionales
+        "total_ventas":          int(resultado["total_ventas"]),
+        "total_vendido":         float(resultado["total_vendido"]),
+        "total_fiado":           float(resultado["total_fiado"]),
+        "total_contado":         total_contado,
+        "total_cobrado":         total_cobrado,
+        # Pedidos
+        "pedidos_entregados":    pedidos_entregados,
+        "total_pedidos_contado": total_contraentrega,
+        "total_pedidos_transf":  total_transferencia,
+        # Total
+        "dinero_en_mano":        dinero_en_mano,
     }
-
 
 # ══════════════════════════════════════════════════════════
 #  ADMIN — resumen general del negocio

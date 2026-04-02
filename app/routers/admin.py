@@ -573,3 +573,58 @@ def resumen_general(
         "vendedores_activos": vendedores_activos,
         "vendido_hoy":        float(ventas_hoy["hoy"]),
     }
+    
+# ═══════════════════════════════════════
+#  CONFIGURACIÓN DEL NEGOCIO
+# ═══════════════════════════════════════
+
+class ConfiguracionItem(BaseModel):
+    clave:       str
+    valor:       str
+    descripcion: Optional[str] = None
+
+class ConfiguracionOutput(BaseModel):
+    clave:       str
+    valor:       str
+    descripcion: Optional[str] = None
+
+
+@router.get("/configuracion", response_model=List[ConfiguracionOutput])
+def listar_configuracion(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    from app.models.pedido import Configuracion
+    items = db.query(Configuracion).order_by(
+        Configuracion.clave
+    ).all()
+    return [
+        ConfiguracionOutput(
+            clave       = c.clave,
+            valor       = c.valor,
+            descripcion = c.descripcion,
+        )
+        for c in items
+    ]
+
+
+@router.put("/configuracion/{clave}")
+def actualizar_configuracion(
+    clave:   str,
+    datos:   ConfiguracionItem,
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    from app.models.pedido import Configuracion
+    cfg = db.query(Configuracion).filter(
+        Configuracion.clave == clave
+    ).first()
+    if not cfg:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Configuración '{clave}' no encontrada.")
+
+    cfg.valor = datos.valor.strip()
+    db.commit()
+    return {"clave": cfg.clave, "valor": cfg.valor,
+            "mensaje": "Actualizado correctamente."}
