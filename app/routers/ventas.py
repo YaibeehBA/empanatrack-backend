@@ -1,6 +1,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from psycopg2 import Date
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from datetime import date, timedelta
 from typing import List, Optional
@@ -149,6 +150,44 @@ def listar_ventas(
     ]
 
 
+###
+@router.get("/historial-fechas", response_model=List[VentaOutput])
+def historial_por_fechas(
+    desde:  str     = Query(...),   # formato YYYY-MM-DD
+    hasta:  str     = Query(...),
+    db:     Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor),
+):
+    from sqlalchemy import cast, Date as SADate
+    from datetime  import date
+
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id
+    ).first()
+    if not vendedor:
+        return []
+
+    ventas = db.query(Venta).filter(
+        Venta.vendedor_id == vendedor.id,
+        cast(Venta.fecha_venta, SADate) >= desde,
+        cast(Venta.fecha_venta, SADate) <= hasta,
+    ).order_by(Venta.fecha_venta.desc()).all()
+
+    return [
+        VentaOutput(
+            id              = v.id,
+            tipo            = v.tipo,
+            monto_total     = float(v.monto_total),
+            monto_pagado    = float(v.monto_pagado),
+            monto_pendiente = float(v.monto_pendiente),
+            estado          = v.estado,
+            fecha_venta     = str(v.fecha_venta),
+            cliente         = v.cliente.nombre if v.cliente else None,
+            vendedor        = vendedor.nombre_completo,
+        ) for v in ventas
+    ]
+
+####
 @router.get("/historial", response_model=List[VentaOutput])
 def historial_ventas(
     periodo: str     = Query(default="hoy"),

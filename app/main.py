@@ -6,6 +6,7 @@ from app.models import recuperacion_contrasena
 import os
 from app.routers import admin, auth, ventas, clientes, reportes, productos, pagos, vendedores, rutas
 from app.routers import pedidos
+from app.routers import websocket_router 
 
 
 app = FastAPI(
@@ -41,6 +42,8 @@ app.include_router(notificaciones.router)
 app.include_router(vendedores.router)
 app.include_router(rutas.router)
 app.include_router(pedidos.router)
+
+app.include_router(websocket_router.router)  
 
 @app.get("/", tags=["Health"])
 def health_check():

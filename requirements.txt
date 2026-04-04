@@ -19,6 +19,7 @@ google-auth==2.49.0
 greenlet==3.3.2
 h11==0.16.0
 httpcore==1.0.9
+httptools==0.7.1
 httpx==0.28.1
 idna==3.11
 Jinja2==3.1.6
@@ -35,6 +36,7 @@ pydantic_core==2.41.5
 PyJWT==2.11.0
 python-dotenv==1.2.2
 python-multipart==0.0.22
+PyYAML==6.0.3
 regex==2025.11.3
 requests==2.32.5
 rsa==4.9.1
@@ -44,3 +46,5 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
 uvicorn==0.41.0
+watchfiles==1.1.1
+websockets==16.0

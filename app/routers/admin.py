@@ -544,36 +544,64 @@ def eliminar_producto(
 @router.get("/resumen")
 def resumen_general(
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_admin)
+    usuario: Usuario = Depends(requiere_admin),
 ):
     from sqlalchemy import text
+    from datetime   import date
 
-    deudas = db.execute(
-        text("""
-            SELECT COUNT(*) as clientes,
-                   COALESCE(SUM(saldo_actual), 0) as total
-            FROM vista_deudas_clientes
-        """)
-    ).mappings().first()
+    hoy = date.today()
 
     vendedores_activos = db.query(Vendedor).filter(
         Vendedor.esta_activo == True
     ).count()
 
-    ventas_hoy = db.execute(
+    deudas = db.execute(
         text("""
-            SELECT COALESCE(SUM(total_vendido), 0) as hoy
-            FROM vista_ventas_hoy
+            SELECT
+                COALESCE(SUM(saldo_actual), 0) AS total_deudas,
+                COUNT(*)                        AS clientes_con_deuda
+            FROM vista_deudas_clientes
+            WHERE saldo_actual > 0
         """)
     ).mappings().first()
 
+    ventas_hoy = db.execute(
+        text("""
+            SELECT
+                COALESCE(SUM(monto_total), 0)  AS total_vendido,
+                COUNT(*)                        AS total_ventas
+            FROM ventas
+            WHERE DATE(fecha_venta) = :hoy
+        """),
+        {"hoy": str(hoy)},
+    ).mappings().first()
+
+    pedidos_hoy = db.execute(
+        text("""
+            SELECT
+                COUNT(*)                                          AS total_pedidos,
+                COALESCE(SUM(total), 0)                          AS total_monto,
+                COALESCE(SUM(CASE WHEN estado='pendiente'
+                    THEN 1 ELSE 0 END), 0)                       AS pendientes,
+                COALESCE(SUM(CASE WHEN estado='entregado'
+                    THEN 1 ELSE 0 END), 0)                       AS entregados
+            FROM pedidos
+            WHERE DATE(creado_en) = :hoy
+        """),
+        {"hoy": str(hoy)},
+    ).mappings().first()
+
     return {
-        "total_deudas":       float(deudas["total"]),
-        "clientes_con_deuda": int(deudas["clientes"]),
+        "total_deudas":       float(deudas["total_deudas"]),
+        "clientes_con_deuda": int(deudas["clientes_con_deuda"]),
         "vendedores_activos": vendedores_activos,
-        "vendido_hoy":        float(ventas_hoy["hoy"]),
+        "vendido_hoy":        float(ventas_hoy["total_vendido"]),
+        "ventas_hoy":         int(ventas_hoy["total_ventas"]),
+        "pedidos_hoy":        int(pedidos_hoy["total_pedidos"]),
+        "pedidos_pendientes": int(pedidos_hoy["pendientes"]),
+        "pedidos_entregados": int(pedidos_hoy["entregados"]),
+        "monto_pedidos_hoy":  float(pedidos_hoy["total_monto"]),
     }
-    
 # ═══════════════════════════════════════
 #  CONFIGURACIÓN DEL NEGOCIO
 # ═══════════════════════════════════════
