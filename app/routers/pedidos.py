@@ -16,6 +16,7 @@ from app.models.cliente     import Cliente
 from app.models.vendedor    import Vendedor
 from app.models.usuario     import Usuario
 from app.core.dependencies  import get_usuario_actual, requiere_vendedor
+from app.services.notificaciones import enviar_notificacion
 
 router = APIRouter(prefix="/pedidos", tags=["Pedidos"])
 
@@ -381,33 +382,66 @@ def historial_pedidos_vendedor(
 # ══════════════════════════════════════════════════════════
 #  HELPERS FCM
 # ══════════════════════════════════════════════════════════
-def _notificar_vendedores(db, pedido):
-    """Notifica a todos los vendedores vía WebSocket + FCM fallback."""
-    import asyncio
-    from app.services.websocket_manager import ws_manager
+from app.services.websocket_manager import ws_manager
 
-    mensaje = {
+def _run_async(coro):
+    """
+    Ejecuta corrutina async desde endpoint sync de FastAPI.
+    FastAPI/Uvicorn ya tiene un loop — usamos run_coroutine_threadsafe.
+    """
+    import asyncio
+    import threading
+
+    result_container = []
+    error_container  = []
+    done_event       = threading.Event()
+
+    def run_in_thread():
+        try:
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                result = new_loop.run_until_complete(coro)
+                result_container.append(result)
+            finally:
+                new_loop.close()
+        except Exception as e:
+            error_container.append(e)
+        finally:
+            done_event.set()
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+    done_event.wait(timeout=5)
+
+    if error_container:
+        raise error_container[0]
+
+
+
+def _notificar_vendedores(db, pedido):
+    """Notifica a todos los vendedores — WS + FCM fallback."""
+
+    mensaje_ws = {
         "tipo":      "nuevo_pedido",
         "pedido_id": str(pedido.id),
         "cliente":   pedido.cliente.nombre if pedido.cliente else "",
         "total":     float(pedido.total),
         "tipo_pago": pedido.tipo_pago,
-        "creado_en": pedido.creado_en.isoformat() if pedido.creado_en else "",
+        "creado_en": pedido.creado_en.isoformat()
+                     if pedido.creado_en else "",
     }
 
+    # ── WebSocket ─────────────────────────────────────
     try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(ws_manager.notificar_todos_vendedores(mensaje))
-    except RuntimeError:
-        # No hay loop corriendo — ignorar silenciosamente
-        pass
+        _run_async(ws_manager.notificar_todos_vendedores(mensaje_ws))
+        print(f"✅ [WS] Notificado nuevo pedido a todos los vendedores")
     except Exception as e:
-        print(f"[WS] Error notificando vendedores: {e}")
+        print(f"❌ [WS] Error notificando vendedores: {e}")
 
-    # FCM fallback
+    # ── FCM fallback ──────────────────────────────────
     try:
-        from app.models.fcm_token        import FcmToken
-        from app.services.notificaciones import enviar_notificacion_usuario
+        from app.models.fcm_token import FcmToken
         vendedores = db.query(Vendedor).filter(
             Vendedor.esta_activo == True
         ).all()
@@ -417,100 +451,90 @@ def _notificar_vendedores(db, pedido):
             ).all()
             for t in tokens:
                 try:
-                    enviar_notificacion_usuario(
-                        token  = t.token,
-                        titulo = "🛒 Nuevo pedido disponible",
-                        cuerpo = f"Pedido de {pedido.cliente.nombre} "
-                                 f"por ${float(pedido.total):.2f}",
-                        datos  = {
+                    enviar_notificacion(
+                        db         = db,
+                        usuario_id = str(v.usuario_id),
+                        titulo     = "🛒 Nuevo pedido disponible",
+                        cuerpo     = f"Pedido de "
+                                     f"{pedido.cliente.nombre if pedido.cliente else 'cliente'}"
+                                     f" por ${float(pedido.total):.2f}",
+                        datos = {
                             "tipo":      "nuevo_pedido",
                             "pedido_id": str(pedido.id),
                         },
                     )
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as ex:
+                    print(f"❌ [FCM] Error enviando a vendedor: {ex}")
+    except Exception as e:
+        print(f"❌ [FCM] Error en FCM fallback: {e}")
 
 
 def _notificar_cliente_aceptado(db, pedido, vendedor):
-    """Notifica al cliente y al vendedor que aceptó."""
-    import asyncio
-    from app.services.websocket_manager import ws_manager
+    """Notifica al cliente que su pedido fue aceptado + al vendedor."""
 
-    if pedido.vendedor_id:
-        mensaje_vendedor = {
-            "tipo":      "pedido_asignado",
-            "pedido_id": str(pedido.id),
-            "cliente":   pedido.cliente.nombre if pedido.cliente else "",
-            "total":     float(pedido.total),
-            "tipo_pago": pedido.tipo_pago,
-        }
-        try:
-            v = db.query(Vendedor).filter(
-                Vendedor.id == pedido.vendedor_id
-            ).first()
-            if v:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    ws_manager.notificar_vendedor(
-                        str(v.usuario_id), mensaje_vendedor))
-        except RuntimeError:
-            pass
-        except Exception as e:
-            print(f"[WS] Error notificando vendedor: {e}")
-
-    # FCM al cliente
+    # ── WS al vendedor que aceptó ─────────────────────
+    mensaje_vendedor = {
+        "tipo":      "pedido_asignado",
+        "pedido_id": str(pedido.id),
+        "cliente":   pedido.cliente.nombre if pedido.cliente else "",
+        "total":     float(pedido.total),
+        "tipo_pago": pedido.tipo_pago,
+    }
     try:
-        from app.models.fcm_token        import FcmToken
-        from app.services.notificaciones import enviar_notificacion_usuario
-        if not pedido.cliente or not pedido.cliente.usuario_id:
-            return
-        tokens = db.query(FcmToken).filter(
-            FcmToken.usuario_id == pedido.cliente.usuario_id
-        ).all()
-        for t in tokens:
-            try:
-                enviar_notificacion_usuario(
-                    token  = t.token,
-                    titulo = "✅ ¡Pedido aceptado!",
-                    cuerpo = f"{vendedor.nombre_completo} "
-                             f"está preparando tu pedido.",
-                    datos  = {
-                        "tipo":      "pedido_aceptado",
-                        "pedido_id": str(pedido.id),
-                    },
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
+        _run_async(ws_manager.notificar_vendedor(
+            str(vendedor.usuario_id), mensaje_vendedor))
+        print(f"✅ [WS] Notificado pedido asignado al vendedor")
+    except Exception as e:
+        print(f"❌ [WS] Error notificando vendedor: {e}")
 
-def _notificar_cliente_entregado(db: Session, pedido: Pedido):
+    # ── FCM al cliente ────────────────────────────────
+    try:
+        if pedido.cliente and pedido.cliente.usuario_id:
+            enviar_notificacion(
+                db         = db,
+                usuario_id = str(pedido.cliente.usuario_id),
+                titulo     = "✅ ¡Pedido aceptado!",
+                cuerpo     = f"{vendedor.nombre_completo} "
+                             f"está preparando tu pedido.",
+                datos = {
+                    "tipo":      "pedido_aceptado",
+                    "pedido_id": str(pedido.id),
+                },
+            )
+    except Exception as e:
+        print(f"❌ [FCM] Error notificando cliente: {e}")
+
+    # ── FCM al vendedor (backup) ──────────────────────
+    try:
+        enviar_notificacion(
+            db         = db,
+            usuario_id = str(vendedor.usuario_id),
+            titulo     = "📦 Pedido asignado",
+            cuerpo     = f"Tienes un nuevo pedido de "
+                         f"{pedido.cliente.nombre if pedido.cliente else 'cliente'}.",
+            datos = {
+                "tipo":      "pedido_asignado",
+                "pedido_id": str(pedido.id),
+            },
+        )
+    except Exception as e:
+        print(f"❌ [FCM] Error notificando vendedor FCM: {e}")
+
+
+def _notificar_cliente_entregado(db, pedido):
     """Notifica al cliente que su pedido fue entregado."""
     try:
-        from app.models.fcm_token        import FcmToken
-        from app.services.notificaciones import enviar_notificacion_usuario
-
-        if not pedido.cliente or not pedido.cliente.usuario_id:
-            return
-
-        tokens = db.query(FcmToken).filter(
-            FcmToken.usuario_id == pedido.cliente.usuario_id
-        ).all()
-        for t in tokens:
-            try:
-                enviar_notificacion_usuario(
-                    token  = t.token,
-                    titulo = "🎉 ¡Pedido entregado!",
-                    cuerpo = "Tu pedido ha sido entregado. "
+        if pedido.cliente and pedido.cliente.usuario_id:
+            enviar_notificacion(
+                db         = db,
+                usuario_id = str(pedido.cliente.usuario_id),
+                titulo     = "🎉 ¡Pedido entregado!",
+                cuerpo     = "Tu pedido ha sido entregado. "
                              "¡Gracias por tu compra!",
-                    datos  = {
-                        "tipo":      "pedido_entregado",
-                        "pedido_id": str(pedido.id),
-                    },
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
+                datos = {
+                    "tipo":      "pedido_entregado",
+                    "pedido_id": str(pedido.id),
+                },
+            )
+    except Exception as e:
+        print(f"❌ [FCM] Error notificando entrega: {e}")
