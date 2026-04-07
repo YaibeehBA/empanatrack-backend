@@ -1,74 +1,52 @@
 # app/routers/productos.py
 import os
-import uuid
-from fastapi             import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses   import JSONResponse
-from sqlalchemy.orm      import Session
-from typing              import List, Optional
-from app.database        import get_db
-from app.models.producto import Producto
-from app.models.usuario  import Usuario
+import cloudinary
+import cloudinary.uploader
+from fastapi              import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from sqlalchemy.orm       import Session
+from typing               import List, Optional
+from app.database         import get_db
+from app.models.producto  import Producto
+from app.models.usuario   import Usuario
 from app.core.dependencies import requiere_vendedor, requiere_admin, get_usuario_actual
-from pydantic            import BaseModel
-from uuid                import UUID
+from pydantic             import BaseModel
+from uuid                 import UUID
+
+# ── Cloudinary config ─────────────────────────────────────
+cloudinary.config(
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key    = os.getenv("CLOUDINARY_API_KEY"),
+    api_secret = os.getenv("CLOUDINARY_API_SECRET"),
+    secure     = True
+)
 
 # ── Schemas ───────────────────────────────────────────────
 class ProductoOutput(BaseModel):
-    id:         UUID
-    nombre:     str
-    precio:     float
-    imagen_url: Optional[str] = None
+    id:          UUID
+    nombre:      str
+    precio:      float
+    imagen_url:  Optional[str] = None
+    imagen_public_id: Optional[str] = None
     esta_activo: bool
     model_config = {"from_attributes": True}
 
 router = APIRouter(prefix="/productos", tags=["Productos"])
 
-# ── Constantes ────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-UPLOAD_DIR = os.path.join(BASE_DIR, "static", "productos")
-MAX_SIZE_BYTES  = 2 * 1024 * 1024          # 2 MB
-TIPOS_PERMITIDOS = {"image/jpeg", "image/png", "image/webp"}
+# ── Helpers Cloudinary ────────────────────────────────────
+def _subir_imagen(archivo: UploadFile) -> tuple[str, str]:
+    """Sube a Cloudinary. Retorna (url, public_id)."""
+    resultado = cloudinary.uploader.upload(
+        archivo.file,
+        folder         = "productos",
+        transformation = [{"width": 800, "height": 800,
+                           "crop": "limit", "quality": "auto"}]
+    )
+    return resultado["secure_url"], resultado["public_id"]
 
-
-# ── Helper: guardar imagen ────────────────────────────────
-def _guardar_imagen(archivo: UploadFile) -> str:
-    # Validar tipo
-    if archivo.content_type not in TIPOS_PERMITIDOS:
-        raise HTTPException(
-            status_code=400,
-            detail="Solo se permiten imágenes JPG, PNG o WEBP"
-        )
-
-    # Leer contenido
-    contenido = archivo.file.read()
-
-    # Validar tamaño
-    if len(contenido) > MAX_SIZE_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail="La imagen no puede superar 2MB"
-        )
-
-    # Generar nombre único
-    extension  = archivo.filename.rsplit(".", 1)[-1].lower()
-    nombre_archivo = f"{uuid.uuid4()}.{extension}"
-    ruta_completa  = os.path.join(UPLOAD_DIR, nombre_archivo)
-
-    # Guardar en disco
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    with open(ruta_completa, "wb") as f:
-        f.write(contenido)
-
-    return f"/static/productos/{nombre_archivo}"
-
-
-# ── Helper: eliminar imagen anterior ─────────────────────
-def _eliminar_imagen(imagen_url: Optional[str]) -> None:
-    if not imagen_url:
-        return
-    ruta = imagen_url.lstrip("/")               # quita el / inicial
-    if os.path.exists(ruta):
-        os.remove(ruta)
+def _eliminar_imagen(public_id: Optional[str]) -> None:
+    """Elimina de Cloudinary por public_id."""
+    if public_id:
+        cloudinary.uploader.destroy(public_id)
 
 
 # ══════════════════════════════════════════════════════════
@@ -111,21 +89,24 @@ def productos_disponibles(
 # ── POST / — crear producto con imagen opcional ───────────
 @router.post("/")
 def crear_producto(
-    nombre:      str          = Form(...),
-    precio:      float        = Form(...),
-    imagen:      Optional[UploadFile] = File(None),
-    db:          Session      = Depends(get_db),
-    usuario:     Usuario      = Depends(requiere_admin),
+    nombre:  str                    = Form(...),
+    precio:  float                  = Form(...),
+    imagen:  Optional[UploadFile]   = File(None),
+    db:      Session                = Depends(get_db),
+    usuario: Usuario                = Depends(requiere_admin),
 ):
-    imagen_url = None
+    imagen_url   = None
+    imagen_public_id = None
+
     if imagen and imagen.filename:
-        imagen_url = _guardar_imagen(imagen)
+        imagen_url, imagen_public_id = _subir_imagen(imagen)
 
     producto = Producto(
-        nombre      = nombre,
-        precio      = precio,
-        imagen_url  = imagen_url,
-        esta_activo = True,
+        nombre           = nombre,
+        precio           = precio,
+        imagen_url       = imagen_url,
+        imagen_public_id = imagen_public_id,
+        esta_activo      = True,
     )
     db.add(producto)
     db.commit()
@@ -144,12 +125,12 @@ def crear_producto(
 @router.put("/{producto_id}")
 def actualizar_producto(
     producto_id: UUID,
-    nombre:      Optional[str]        = Form(None),
-    precio:      Optional[float]      = Form(None),
-    esta_activo: Optional[bool]       = Form(None),
+    nombre:      Optional[str]      = Form(None),
+    precio:      Optional[float]    = Form(None),
+    esta_activo: Optional[bool]     = Form(None),
     imagen:      Optional[UploadFile] = File(None),
-    db:          Session              = Depends(get_db),
-    usuario:     Usuario              = Depends(requiere_admin),
+    db:          Session            = Depends(get_db),
+    usuario:     Usuario            = Depends(requiere_admin),
 ):
     producto = db.query(Producto).filter(
         Producto.id == producto_id
@@ -162,10 +143,11 @@ def actualizar_producto(
     if precio      is not None: producto.precio      = precio
     if esta_activo is not None: producto.esta_activo = esta_activo
 
-    # Si llega nueva imagen, eliminar la anterior y guardar la nueva
     if imagen and imagen.filename:
-        _eliminar_imagen(producto.imagen_url)
-        producto.imagen_url = _guardar_imagen(imagen)
+        # Eliminar imagen anterior de Cloudinary
+        _eliminar_imagen(producto.imagen_public_id)
+        # Subir nueva
+        producto.imagen_url, producto.imagen_public_id = _subir_imagen(imagen)
 
     db.commit()
     db.refresh(producto)
@@ -193,8 +175,9 @@ def eliminar_imagen_producto(
     if not producto:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
-    _eliminar_imagen(producto.imagen_url)
-    producto.imagen_url = None
+    _eliminar_imagen(producto.imagen_public_id)
+    producto.imagen_url       = None
+    producto.imagen_public_id = None
     db.commit()
 
     return {"mensaje": "Imagen eliminada correctamente"}

@@ -19,43 +19,31 @@ from app.utils.validators import validar_coordenada_latitud, validar_coordenada_
 
 router = APIRouter(prefix="/admin", tags=["Administrador"])
 
+import cloudinary
+import cloudinary.uploader
+import os
 
-# Ruta absoluta: sube un nivel desde /app/routers/ hasta la raíz del proyecto
+cloudinary.config(
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key    = os.getenv("CLOUDINARY_API_KEY"),
+    api_secret = os.getenv("CLOUDINARY_API_SECRET"),
+    secure     = True
+)
 
-BASE_DIR   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-UPLOAD_DIR = os.path.join(BASE_DIR, "static", "productos")
-ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_SIZE_MB  = 5
+def _subir_imagen_cloudinary(imagen: UploadFile) -> tuple[str, str]:
+    """Sube imagen a Cloudinary. Retorna (url, public_id)."""
+    resultado = cloudinary.uploader.upload(
+        imagen.file,
+        folder         = "productos",
+        transformation = [{"width": 800, "height": 800,
+                           "crop": "limit", "quality": "auto"}]
+    )
+    return resultado["secure_url"], resultado["public_id"]
 
-
-# ── Helpers imágenes ──────────────────────────────────────
-def _guardar_imagen(archivo: UploadFile) -> str:
-    ext = os.path.splitext(archivo.filename or "")[1].lower()
-    if ext not in ALLOWED_EXTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Formato no permitido. Usa: {', '.join(ALLOWED_EXTS)}"
-        )
-    contenido = archivo.file.read()
-    if len(contenido) > MAX_SIZE_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=400,
-            detail=f"La imagen no puede superar {MAX_SIZE_MB}MB"
-        )
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    nombre_archivo = f"{uuid_lib.uuid4()}{ext}"
-    with open(os.path.join(UPLOAD_DIR, nombre_archivo), "wb") as f:
-        f.write(contenido)
-    return nombre_archivo
-
-
-def _eliminar_imagen(imagen_url: Optional[str]) -> None:
-    if not imagen_url:
-        return
-    nombre = imagen_url.split("/")[-1]
-    ruta   = os.path.join(UPLOAD_DIR, nombre)
-    if os.path.exists(ruta):
-        os.remove(ruta)
+def _eliminar_imagen_cloudinary(public_id: str | None) -> None:
+    """Elimina imagen de Cloudinary por public_id."""
+    if public_id:
+        cloudinary.uploader.destroy(public_id)
 
 
 # ═══════════════════════════════════════
@@ -415,6 +403,7 @@ class ProductoOutput(BaseModel):
     precio:      float
     esta_activo: bool
     imagen_url:  Optional[str] = None
+    imagen_public_id: Optional[str] = None
     model_config = {"from_attributes": True}
 
 class ProductoEditar(BaseModel):
@@ -484,14 +473,15 @@ def subir_imagen_producto(
         Producto.id == producto_id
     ).first()
     if not producto:
-        raise HTTPException(
-            status_code=404, detail="Producto no encontrado."
-        )
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
 
-    _eliminar_imagen(producto.imagen_url)
+    # Eliminar imagen anterior si existe
+    _eliminar_imagen_cloudinary(producto.imagen_public_id)
 
-    nombre_archivo      = _guardar_imagen(imagen)
-    producto.imagen_url = f"/static/productos/{nombre_archivo}"
+    # Subir nueva imagen
+    url, public_id         = _subir_imagen_cloudinary(imagen)
+    producto.imagen_url    = url
+    producto.imagen_public_id = public_id
 
     db.commit()
     db.refresh(producto)
@@ -508,35 +498,34 @@ def eliminar_imagen_producto(
         Producto.id == producto_id
     ).first()
     if not producto:
-        raise HTTPException(
-            status_code=404, detail="Producto no encontrado."
-        )
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
 
-    _eliminar_imagen(producto.imagen_url)
-    producto.imagen_url = None
+    _eliminar_imagen_cloudinary(producto.imagen_public_id)
+    producto.imagen_url       = None
+    producto.imagen_public_id = None
     db.commit()
 
     return {"mensaje": "Imagen eliminada correctamente"}
-
-
 @router.delete("/productos/{producto_id}")
 def eliminar_producto(
     producto_id: UUID,
-    db:          Session = Depends(get_db),
-    usuario:     Usuario = Depends(requiere_admin)
+    db: Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin)
 ):
-    producto = db.query(Producto).filter(
-        Producto.id == producto_id
-    ).first()
+    # Buscar el producto
+    producto = db.query(Producto).filter(Producto.id == producto_id).first()
     if not producto:
-        raise HTTPException(
-            status_code=404, detail="Producto no encontrado."
-        )
-    _eliminar_imagen(producto.imagen_url)
+        raise HTTPException(status_code=404, detail="Producto no encontrado.")
+    
+    # Opcional: Eliminar la imagen de Cloudinary si existe
+    if producto.imagen_public_id:
+        _eliminar_imagen_cloudinary(producto.imagen_public_id)
+    
+    # Eliminar el producto de la base de datos
     db.delete(producto)
     db.commit()
+    
     return {"mensaje": "Producto eliminado correctamente"}
-
 # ═══════════════════════════════════════
 #  REPORTE GENERAL
 # ═══════════════════════════════════════

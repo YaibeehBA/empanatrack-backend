@@ -12,6 +12,7 @@ class Producto(Base):
     precio      = Column(Numeric(10, 2), nullable=False)
     esta_activo = Column(Boolean, default=True, nullable=False)
     imagen_url  = Column(String(500), nullable=True)   
+    imagen_public_id = Column(String, nullable=True)
 
     # Relaciones
     detalle_ventas = relationship("DetalleVenta", back_populates="producto")

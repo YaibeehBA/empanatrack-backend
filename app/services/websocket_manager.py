@@ -6,9 +6,11 @@ class WebSocketManager:
     """
     Maneja conexiones WebSocket activas por rol.
     vendedores: {vendedor_usuario_id: [WebSocket, ...]}
+    clientes_tracking: {pedido_id: [WebSocket, ...]}
     """
     def __init__(self):
         self.vendedores: Dict[str, List[WebSocket]] = {}
+        self.clientes_tracking: Dict[str, List[WebSocket]] = {}
 
     async def conectar_vendedor(
             self, websocket: WebSocket, usuario_id: str):
@@ -43,7 +45,6 @@ class WebSocketManager:
                 except Exception:
                     caidos.append((usuario_id, ws))
 
-        # Limpiar conexiones caídas
         for usuario_id, ws in caidos:
             self.desconectar_vendedor(ws, usuario_id)
 
@@ -61,6 +62,46 @@ class WebSocketManager:
                 caidos.append(ws)
         for ws in caidos:
             self.desconectar_vendedor(ws, usuario_id)
+
+    async def conectar_cliente_tracking(
+            self, websocket: WebSocket, pedido_id: str):
+        await websocket.accept()
+        if pedido_id not in self.clientes_tracking:
+            self.clientes_tracking[pedido_id] = []
+        self.clientes_tracking[pedido_id].append(websocket)
+        print(f"✅ [WS] Cliente tracking pedido {pedido_id}")
+
+    def desconectar_cliente_tracking(
+            self, websocket: WebSocket, pedido_id: str):
+        if pedido_id in self.clientes_tracking:
+            self.clientes_tracking[pedido_id] = [
+                ws for ws in self.clientes_tracking[pedido_id]
+                if ws != websocket
+            ]
+            if not self.clientes_tracking[pedido_id]:
+                del self.clientes_tracking[pedido_id]
+
+    async def enviar_ubicacion_vendedor(
+            self, pedido_id: str, lat: float, lng: float,
+            estado: str):
+        """Envía ubicación del vendedor a los clientes que siguen ese pedido."""
+        if pedido_id not in self.clientes_tracking:
+            return
+        datos  = json.dumps({
+            "tipo":      "ubicacion_vendedor",
+            "pedido_id": pedido_id,
+            "lat":       lat,
+            "lng":       lng,
+            "estado":    estado,
+        })
+        caidos = []
+        for ws in self.clientes_tracking[pedido_id]:
+            try:
+                await ws.send_text(datos)
+            except Exception:
+                caidos.append(ws)
+        for ws in caidos:
+            self.desconectar_cliente_tracking(ws, pedido_id)
 
     def _total(self) -> int:
         return sum(len(v) for v in self.vendedores.values())
