@@ -645,3 +645,127 @@ def actualizar_configuracion(
     db.commit()
     return {"clave": cfg.clave, "valor": cfg.valor,
             "mensaje": "Actualizado correctamente."}
+    
+
+from app.models.repartidor import Repartidor
+
+class CrearRepartidor(BaseModel):
+    nombre_completo: str
+    nombre_usuario:  str
+    contrasena:      str
+    correo:          Optional[str] = None
+    telefono:        Optional[str] = None
+
+class EditarRepartidor(BaseModel):
+    nombre_completo:  Optional[str]  = None
+    telefono:         Optional[str]  = None
+    esta_activo:      Optional[bool] = None
+    nueva_contrasena: Optional[str]  = None
+    
+    
+@router.get("/repartidores")
+def listar_repartidores(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    repartidores = db.query(Repartidor).order_by(
+        Repartidor.nombre_completo).all()
+    return [_repartidor_dict(r) for r in repartidores]
+
+@router.post("/repartidores")
+def crear_repartidor(
+    datos: CrearRepartidor,
+    db:    Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+
+   
+    usuario_nuevo = Usuario(
+        nombre_usuario  = datos.nombre_usuario,
+        correo          = datos.correo,
+        contrasena_hash = hashear_contrasena(datos.contrasena),
+        rol             = "repartidor",
+    )
+    db.add(usuario_nuevo)
+    db.flush()
+
+    repartidor = Repartidor(
+        usuario_id      = usuario_nuevo.id,
+        nombre_completo = datos.nombre_completo,
+        telefono        = datos.telefono,
+    )
+    db.add(repartidor)
+    db.commit()
+    return _repartidor_dict(repartidor)
+
+def _repartidor_dict(r: Repartidor) -> dict:
+    return {
+        "id":              str(r.id),
+        "usuario_id":      str(r.usuario_id),
+        "nombre_completo": r.nombre_completo,
+        "telefono":        r.telefono,
+        "esta_activo":     r.esta_activo,
+        "nombre_usuario":  r.usuario.nombre_usuario if r.usuario else None,
+        "correo":          r.usuario.correo if r.usuario else None,
+    }
+
+@router.put("/repartidores/{repartidor_id}")
+def editar_repartidor(
+    repartidor_id: str,
+    datos: EditarRepartidor,
+    db:    Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    repartidor = db.query(Repartidor).filter(
+        Repartidor.id == repartidor_id).first()
+    if not repartidor:
+        raise HTTPException(404, "Repartidor no encontrado.")
+
+    if datos.nombre_completo:
+        repartidor.nombre_completo = datos.nombre_completo
+    if datos.telefono is not None:
+        repartidor.telefono = datos.telefono
+    if datos.esta_activo is not None:
+        repartidor.esta_activo = datos.esta_activo
+
+    if datos.nueva_contrasena:
+        usuario_rep = db.query(Usuario).filter(
+            Usuario.id == repartidor.usuario_id).first()
+        if usuario_rep:
+            usuario_rep.contrasena_hash = hashear_contrasena(
+                datos.nueva_contrasena)
+
+    db.commit()
+    return _repartidor_dict(repartidor)
+
+
+@router.delete("/repartidores/{repartidor_id}")
+def eliminar_repartidor(
+    repartidor_id: str,
+    db:    Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    repartidor = db.query(Repartidor).filter(
+        Repartidor.id == repartidor_id).first()
+    if not repartidor:
+        raise HTTPException(404, "Repartidor no encontrado.")
+
+    # Verificar que no tenga pedidos activos
+    from app.models.pedido import Pedido
+    tiene_pedidos = db.query(Pedido).filter(
+        Pedido.repartidor_id == repartidor.id).first()
+    if tiene_pedidos:
+        raise HTTPException(
+            400,
+            "No se puede eliminar: tiene pedidos registrados. "
+            "Desactívalo en su lugar.")
+
+    usuario_rep = db.query(Usuario).filter(
+        Usuario.id == repartidor.usuario_id).first()
+    db.delete(repartidor)
+    if usuario_rep:
+        db.delete(usuario_rep)
+    db.commit()
+    return {"mensaje": "Repartidor eliminado."}
+
+

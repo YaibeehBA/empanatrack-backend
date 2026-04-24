@@ -30,9 +30,15 @@ class Pedido(Base):
                                ForeignKey("clientes.id"), nullable=False)
     vendedor_id       = Column(UUID(as_uuid=True),
                                ForeignKey("vendedores.id"), nullable=True)
-    estado            = Column(String(30),   nullable=False,
+    repartidor_id     = Column(UUID(as_uuid=True),          
+                               ForeignKey("repartidores.id"), nullable=True)
+    tipo              = Column(String(20), nullable=False,   
+                               default="normal")
+    empresa_id        = Column(UUID(as_uuid=True),           
+                               ForeignKey("empresas.id"), nullable=True)
+    estado            = Column(String(30), nullable=False,
                                default="pendiente")
-    tipo_pago         = Column(String(20),   nullable=False,
+    tipo_pago         = Column(String(20), nullable=False,
                                default="contraentrega")
     total             = Column(DECIMAL(10,2), nullable=False, default=0)
     direccion_entrega = Column(Text, nullable=True)
@@ -45,10 +51,12 @@ class Pedido(Base):
     creado_en         = Column(TIMESTAMP(timezone=True),
                                server_default=func.now())
 
-    cliente  = relationship("Cliente")
-    vendedor = relationship("Vendedor")
-    items    = relationship("PedidoItem", back_populates="pedido",
-                            cascade="all, delete-orphan")
+    cliente     = relationship("Cliente")
+    vendedor    = relationship("Vendedor")
+    repartidor  = relationship("Repartidor")   
+    empresa     = relationship("Empresa")       
+    items       = relationship("PedidoItem", back_populates="pedido",
+                               cascade="all, delete-orphan")
 
 
 class PedidoItem(Base):

@@ -155,6 +155,27 @@ def listar_empresas(
         for e in empresas
     ]
 
+@router.get("/mi-empresa")
+def mi_empresa(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(get_usuario_actual),
+):
+    """Devuelve la empresa del cliente si tiene una."""
+    if usuario.rol != "cliente":
+        raise HTTPException(403, "Solo clientes.")
+
+    cliente = db.query(Cliente).filter(
+        Cliente.usuario_id == usuario.id).first()
+    if not cliente or not cliente.empresa_id:
+        return None
+
+    empresa = db.execute(text("""
+        SELECT id, nombre, direccion
+        FROM empresas
+        WHERE id = :eid
+    """), {"eid": str(cliente.empresa_id)}).mappings().first()
+
+    return dict(empresa) if empresa else None
 
 # ══════════════════════════════════════════════════════════
 #  GET /clientes/verificar-cedula/{cedula}

@@ -11,7 +11,7 @@ class Usuario(Base):
     nombre_usuario  = Column(String(100), nullable=False, unique=True)
     correo          = Column(String(200), unique=True, nullable=True)
     contrasena_hash = Column(String(255), nullable=False)
-    rol             = Column(PgEnum("administrador", "vendedor", "cliente",
+    rol             = Column(PgEnum("administrador", "vendedor", "cliente","repartidor",
                                    name="rol_usuario"), nullable=False)
     esta_activo     = Column(Boolean, default=True, nullable=False)
 

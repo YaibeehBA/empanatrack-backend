@@ -66,3 +66,12 @@ def requiere_vendedor(usuario: Usuario = Depends(get_usuario_actual)) -> Usuario
             detail="Solo los vendedores pueden realizar esta acción."
         )
     return usuario
+
+def requiere_repartidor(
+    usuario: Usuario = Depends(get_usuario_actual)
+) -> Usuario:
+    if usuario.rol not in ("repartidor", "administrador"):
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso solo para repartidores.")
+    return usuario
