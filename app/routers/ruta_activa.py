@@ -586,6 +586,7 @@ def resumen_ruta(
 #  GET /ruta-activa/stock-restante
 #  Stock inicial del día MENOS lo ya vendido hoy
 # ══════════════════════════════════════════════════════════
+
 @router.get("/stock-restante")
 def stock_restante(
     db:      Session = Depends(get_db),
@@ -594,7 +595,8 @@ def stock_restante(
     vendedor = _get_vendedor(db, usuario)
     hoy      = date.today()
 
-    stock_inicial = db.execute(text("""
+    # Verificar si hay stock registrado hoy
+    stock_rows = db.execute(text("""
         SELECT
             sd.producto_id,
             p.nombre,
@@ -608,7 +610,7 @@ def stock_restante(
           AND sd.fecha = :hoy
     """), {"vid": str(vendedor.id), "hoy": str(hoy)}).mappings().all()
 
-    if not stock_inicial:
+    if not stock_rows:
         return {
             "productos":      [],
             "total_restante": 0,
@@ -616,20 +618,17 @@ def stock_restante(
             "stock_cargado":  False,
         }
 
-    # Timestamp más antiguo del stock de hoy
-    # Solo contar ventas DESPUÉS de que se cargó el stock
-    stock_creado_en = min(
-        s["stock_creado_en"] for s in stock_inicial
-    )
+    # Timestamp más antiguo del stock → solo ventas después de cargar
+    stock_creado_en = min(s["stock_creado_en"] for s in stock_rows)
 
-    # ── Ventas solo DESPUÉS de que se guardó el stock ────
+    # Ventas después de cargar el stock
     vendidas = db.execute(text("""
         SELECT
             dv.producto_id,
             COALESCE(SUM(dv.cantidad), 0) AS vendidas
         FROM detalle_ventas dv
         JOIN ventas v ON v.id = dv.venta_id
-        WHERE v.vendedor_id = :vid
+        WHERE v.vendedor_id  = :vid
           AND v.fecha_venta >= :desde
           AND v.fecha_venta::date = :hoy
         GROUP BY dv.producto_id
@@ -644,24 +643,54 @@ def stock_restante(
         for r in vendidas
     }
 
+    # Todos los productos activos para saber cuáles no
+    # fueron incluidos en el stock (tratarlos como 0)
+    todos_productos = db.execute(text("""
+        SELECT id, nombre, precio, imagen_url
+        FROM productos
+        WHERE esta_activo = TRUE
+    """)).mappings().all()
+
+    # Mapa de stock registrado hoy
+    stock_map = {
+        str(s["producto_id"]): s for s in stock_rows
+    }
+
     resultado      = []
     total_restante = 0
 
-    for s in stock_inicial:
-        pid      = str(s["producto_id"])
-        inicial  = int(s["cantidad_inicial"])
-        vendido  = vendidas_map.get(pid, 0)
-        restante = max(0, inicial - vendido)
-        total_restante += restante
-        resultado.append({
-            "producto_id":       pid,
-            "nombre":            s["nombre"],
-            "precio":            float(s["precio"]),
-            "imagen_url":        s["imagen_url"],
-            "cantidad_inicial":  inicial,
-            "cantidad_vendida":  vendido,
-            "cantidad_restante": restante,
-        })
+    for p in todos_productos:
+        pid = str(p["id"])
+        s   = stock_map.get(pid)
+
+        if s is None:
+            # Producto activo pero NO incluido en stock del día
+            # → definitivamente 0 disponible
+            resultado.append({
+                "producto_id":       pid,
+                "nombre":            p["nombre"],
+                "precio":            float(p["precio"]),
+                "imagen_url":        p["imagen_url"],
+                "cantidad_inicial":  0,
+                "cantidad_vendida":  0,
+                "cantidad_restante": 0,
+                "en_stock_hoy":      False,  # ← no fue registrado
+            })
+        else:
+            inicial  = int(s["cantidad_inicial"])
+            vendido  = vendidas_map.get(pid, 0)
+            restante = max(0, inicial - vendido)
+            total_restante += restante
+            resultado.append({
+                "producto_id":       pid,
+                "nombre":            p["nombre"],
+                "precio":            float(p["precio"]),
+                "imagen_url":        p["imagen_url"],
+                "cantidad_inicial":  inicial,
+                "cantidad_vendida":  vendido,
+                "cantidad_restante": restante,
+                "en_stock_hoy":      True,
+            })
 
     return {
         "productos":      resultado,
