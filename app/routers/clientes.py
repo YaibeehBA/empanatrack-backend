@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing  import List, Optional
+from datetime import date  
 
 from fastapi             import APIRouter, Depends, HTTPException, Query
 from sqlalchemy          import or_
@@ -353,3 +354,169 @@ def eliminar_cliente(
     db.delete(cliente)
     db.commit()
     return {"mensaje": "Cliente eliminado correctamente."}
+
+
+@router.get("/mapa-ruta")
+def mapa_ruta_cliente(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(get_usuario_actual),
+):
+    """
+    Devuelve el estado actual de la ruta del vendedor
+    asignado a la empresa del cliente.
+    """
+    if usuario.rol != "cliente":
+        raise HTTPException(403, "Solo clientes.")
+
+    cliente = db.query(Cliente).filter(
+        Cliente.usuario_id == usuario.id).first()
+    if not cliente:
+        raise HTTPException(404, "Cliente no encontrado.")
+
+    if not cliente.empresa_id:
+        return {
+            "tiene_empresa":   False,
+            "ruta_activa":     False,
+            "mensaje":         "No estás asociado a una empresa.",
+        }
+
+    hoy = date.today()
+
+    # Buscar vendedor con sesión activa que tenga
+    # la empresa del cliente en su ruta
+    row = db.execute(text("""
+        SELECT
+            v.id            AS vendedor_id,
+            v.nombre_completo AS vendedor_nombre,
+            sr.id           AS sesion_id,
+            sr.iniciada_en,
+            ra.id           AS asignacion_id,
+            r.id            AS ruta_id,
+            r.nombre        AS ruta_nombre,
+            re_cliente.orden AS orden_empresa_cliente
+        FROM vendedores v
+        JOIN ruta_asignaciones ra ON ra.vendedor_id = v.id
+            AND ra.esta_activa = TRUE
+        JOIN rutas r ON r.id = ra.ruta_id
+            AND r.esta_activa = TRUE
+        JOIN ruta_empresas re_cliente
+            ON re_cliente.ruta_id = r.id
+            AND re_cliente.empresa_id = :eid
+        JOIN sesiones_ruta sr
+            ON sr.asignacion_id = ra.id
+            AND sr.fecha = :hoy
+            AND sr.estado = 'iniciada'
+        WHERE v.esta_activo = TRUE
+        LIMIT 1
+    """), {
+        "eid": str(cliente.empresa_id),
+        "hoy": str(hoy),
+    }).mappings().first()
+
+    if not row:
+        # Verificar si hay ruta asignada pero no iniciada aún
+        ruta_asignada = db.execute(text("""
+            SELECT v.nombre_completo, r.nombre AS ruta_nombre
+            FROM vendedores v
+            JOIN ruta_asignaciones ra ON ra.vendedor_id = v.id
+                AND ra.esta_activa = TRUE
+            JOIN rutas r ON r.id = ra.ruta_id
+                AND r.esta_activa = TRUE
+            JOIN ruta_empresas re ON re.ruta_id = r.id
+                AND re.empresa_id = :eid
+            WHERE v.esta_activo = TRUE
+            LIMIT 1
+        """), {"eid": str(cliente.empresa_id)}).mappings().first()
+
+        return {
+            "tiene_empresa":   True,
+            "empresa_id":      str(cliente.empresa_id),
+            "ruta_activa":     False,
+            "vendedor_nombre": ruta_asignada["nombre_completo"]
+                               if ruta_asignada else None,
+            "mensaje": "El vendedor aún no ha iniciado su ruta hoy."
+                       if ruta_asignada
+                       else "No hay vendedor asignado a tu empresa.",
+        }
+
+    sesion_id  = str(row["sesion_id"])
+    vendedor_id = str(row["vendedor_id"])
+    orden_cliente = int(row["orden_empresa_cliente"])
+
+    # Todas las empresas de la ruta con estado de visita
+    empresas_rows = db.execute(text("""
+        SELECT
+            e.id,
+            e.nombre,
+            e.direccion,
+            e.latitud,
+            e.longitud,
+            re.orden,
+            CASE WHEN vv.es_valida = TRUE THEN TRUE
+                 ELSE FALSE END AS visitada,
+            vv.marcada_en
+        FROM ruta_empresas re
+        JOIN empresas e ON e.id = re.empresa_id
+        LEFT JOIN visitas_verificadas vv
+            ON vv.empresa_id = e.id
+            AND vv.sesion_id = :sid
+            AND vv.es_valida = TRUE
+        WHERE re.ruta_id = :rid
+        ORDER BY re.orden
+    """), {
+        "sid": sesion_id,
+        "rid": str(row["ruta_id"]),
+    }).mappings().all()
+
+    empresas = []
+    visitadas_count = 0
+    empresas_antes_cliente = 0
+
+    for emp in empresas_rows:
+        visitada = bool(emp["visitada"])
+        if visitada:
+            visitadas_count += 1
+
+        es_empresa_cliente = str(emp["id"]) == str(cliente.empresa_id)
+
+        # Cuántas empresas faltan antes de llegar al cliente
+        if not visitada and not es_empresa_cliente:
+            orden = int(emp["orden"])
+            if orden < orden_cliente:
+                empresas_antes_cliente += 1
+
+        empresas.append({
+            "id":                 str(emp["id"]),
+            "nombre":             emp["nombre"],
+            "direccion":          emp["direccion"],
+            "latitud":            float(emp["latitud"])
+                                  if emp["latitud"] else None,
+            "longitud":           float(emp["longitud"])
+                                  if emp["longitud"] else None,
+            "orden":              emp["orden"],
+            "visitada":           visitada,
+            "es_mi_empresa":      es_empresa_cliente,
+        })
+
+    empresa_cliente = next(
+        (e for e in empresas
+         if e["es_mi_empresa"]), None)
+
+    ya_visitada = empresa_cliente["visitada"] \
+        if empresa_cliente else False
+
+    return {
+        "tiene_empresa":           True,
+        "empresa_id":              str(cliente.empresa_id),
+        "ruta_activa":             True,
+        "vendedor_id":             vendedor_id,
+        "vendedor_nombre":         row["vendedor_nombre"],
+        "sesion_id":               sesion_id,
+        "ruta_nombre":             row["ruta_nombre"],
+        "empresas":                empresas,
+        "total_empresas":          len(empresas),
+        "empresas_visitadas":      visitadas_count,
+        "empresas_antes_cliente":  empresas_antes_cliente,
+        "mi_empresa_visitada":     ya_visitada,
+        "orden_mi_empresa":        orden_cliente,
+    }
