@@ -12,6 +12,7 @@ from app.models.empresa    import Empresa
 from app.models.vendedor   import Vendedor
 from app.models.usuario    import Usuario
 from app.core.dependencies import requiere_admin, requiere_vendedor
+from app.utils.ruta_utils import calcular_orden_y_polilinea
 
 router = APIRouter(prefix="/rutas", tags=["Rutas"])
 
@@ -339,240 +340,68 @@ class RutaCalculada(BaseModel):
 async def calcular_ruta(
     ruta_id: str,
     db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(requiere_vendedor),   # vendedor y admin
+    usuario: Usuario = Depends(requiere_vendedor),
 ):
+    # ── 1. Cargar ruta ────────────────────────────────────────────────────────
     ruta = db.query(Ruta).filter(Ruta.id == ruta_id).first()
     if not ruta:
         raise HTTPException(status_code=404, detail="Ruta no encontrada.")
-
+ 
     empresas = [
         re.empresa for re in ruta.empresas
         if re.empresa
         and re.empresa.esta_activa
-        and re.empresa.latitud is not None
+        and re.empresa.latitud  is not None
         and re.empresa.longitud is not None
     ]
-
+ 
     if len(empresas) < 2:
         raise HTTPException(
             status_code=400,
-            detail="La ruta necesita al menos 2 empresas con coordenadas GPS."
+            detail="La ruta necesita al menos 2 empresas con coordenadas GPS.",
         )
-
-    coords_list = [(float(e.latitud), float(e.longitud)) for e in empresas]
-
-    # ── PASO 1: Matriz de duraciones OSRM ────────────
-    orden = list(range(len(empresas)))   # fallback: orden original
-    fuente = "haversine"
-
-    try:
-        coords_str = ";".join(
-            f"{lng},{lat}" for lat, lng in coords_list
-        )
-        table_url = (
-            f"https://routing.openstreetmap.de/routed-foot"
-            f"/table/v1/foot/{coords_str}?annotations=duration"
-        )
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(table_url)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == "Ok":
-                matriz = [
-                    [float(v) for v in row]
-                    for row in data["durations"]
-                ]
-                orden  = _vecino_mas_cercano(matriz)
-                fuente = "osrm"
-
-    except Exception:
-        pass   # fallback a haversine
-
-    # Si falló la matriz, ordenar por Haversine
-    if fuente == "haversine":
-        orden = _vecino_mas_cercano_haversine(coords_list)
-
-    empresas_ord = [empresas[i] for i in orden]
-
-    # ── PASO 2: OSRM Route API ────────────────────────
-    puntos_polilinea = []
-    distancias_legs  = [0.0] + [0.0] * (len(empresas_ord) - 1)
-
-    try:
-        coords_str = ";".join(
-            f"{float(e.longitud)},{float(e.latitud)}"
-            for e in empresas_ord
-        )
-        route_url = (
-            f"https://routing.openstreetmap.de/routed-foot"
-            f"/route/v1/foot/{coords_str}"
-            f"?overview=full&geometries=geojson"
-            f"&steps=true&continue_straight=false"
-        )
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(route_url)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == "Ok" and data.get("routes"):
-                route = data["routes"][0]
-                legs  = route["legs"]
-
-                # Distancias reales por tramo
-                distancias_legs = [0.0] + [
-                    float(leg["distance"]) for leg in legs
-                ]
-
-                # Extraer puntos de los steps (máxima precisión)
-                vistos = set()
-                for leg in legs:
-                    for step in leg.get("steps", []):
-                        for c in step["geometry"]["coordinates"]:
-                            key = (round(c[1], 7), round(c[0], 7))
-                            if key not in vistos:
-                                vistos.add(key)
-                                puntos_polilinea.append(
-                                    PuntoRuta(latitud=c[1], longitud=c[0])
-                                )
-
-    except Exception:
-        pass   # fallback: líneas rectas
-
-    # Fallback polilínea: líneas rectas entre empresas
-    if not puntos_polilinea:
-        puntos_polilinea = [
-            PuntoRuta(latitud=float(e.latitud), longitud=float(e.longitud))
-            for e in empresas_ord
-        ]
-        # Recalcular distancias por Haversine
-        distancias_legs = [0.0]
-        for i in range(1, len(empresas_ord)):
-            distancias_legs.append(_haversine(
-                float(empresas_ord[i-1].latitud),
-                float(empresas_ord[i-1].longitud),
-                float(empresas_ord[i].latitud),
-                float(empresas_ord[i].longitud),
-            ))
-
-    distancia_total = sum(distancias_legs)
-    tiempo_minutos  = distancia_total / 83.3   # 5 km/h
-
-    # ── Construir respuesta ───────────────────────────
-    paradas = []
-    for i, empresa in enumerate(empresas_ord):
-        paradas.append(ParadaRuta(
-            empresa_id=               str(empresa.id),
-            nombre=                   empresa.nombre,
-            direccion=                empresa.direccion,
-            latitud=                  float(empresa.latitud),
-            longitud=                 float(empresa.longitud),
-            distancia_desde_anterior= distancias_legs[i],
+ 
+    # ── 2. Calcular orden + polilínea (toda la lógica en utils) ──────────────
+    coords = [(float(e.latitud), float(e.longitud)) for e in empresas]
+ 
+    resultado = await calcular_orden_y_polilinea(coords)
+ 
+    empresas_ord = [empresas[i] for i in resultado.orden]
+ 
+    # ── 3. Construir respuesta ────────────────────────────────────────────────
+    # Distancias por parada: primera parada = 0, resto = distancia del segmento previo
+    distancias = [0.0] + [s.distancia for s in resultado.segmentos]
+ 
+    paradas = [
+        ParadaRuta(
+            empresa_id=               str(empresas_ord[i].id),
+            nombre=                   empresas_ord[i].nombre,
+            direccion=                empresas_ord[i].direccion,
+            latitud=                  float(empresas_ord[i].latitud),
+            longitud=                 float(empresas_ord[i].longitud),
+            distancia_desde_anterior= distancias[i],
             es_inicio=                i == 0,
             es_fin=                   i == len(empresas_ord) - 1,
-        ))
-
+        )
+        for i in range(len(empresas_ord))
+    ]
+ 
+    # Unir los puntos de todos los segmentos en una sola polilínea
+    # Eliminamos el primer punto de cada segmento (excepto el primero)
+    # para no duplicar el punto de unión entre segmentos
+    puntos_polilinea: list[PuntoRuta] = []
+    for i, segmento in enumerate(resultado.segmentos):
+        puntos = segmento.puntos if i == 0 else segmento.puntos[1:]
+        puntos_polilinea.extend(
+            PuntoRuta(latitud=p[0], longitud=p[1]) for p in puntos
+        )
+ 
     return RutaCalculada(
         paradas=          paradas,
         puntos_polilinea= puntos_polilinea,
-        distancia_total=  distancia_total,
-        tiempo_minutos=   tiempo_minutos,
-        fuente=           fuente,
+        distancia_total=  resultado.distancia_total,
+        tiempo_minutos=   resultado.tiempo_minutos,
+        fuente=           resultado.fuente_segmentos,
     )
 
 
-# ══════════════════════════════════════════════════════════
-#  HELPERS ALGORITMOS
-# ══════════════════════════════════════════════════════════
-
-def _vecino_mas_cercano(matriz: list) -> list:
-    """Prueba todos los inicios posibles, devuelve el orden
-    con menor duración total según la matriz OSRM."""
-    n = len(matriz)
-    if n <= 2:
-        return list(range(n))
-
-    mejor_total = float("inf")
-    mejor_orden = list(range(n))
-
-    for inicio in range(n):
-        visitados = {inicio}
-        orden     = [inicio]
-        total     = 0.0
-
-        while len(orden) < n:
-            actual   = orden[-1]
-            min_dur  = float("inf")
-            siguiente = -1
-
-            for j in range(n):
-                if j not in visitados:
-                    dur = matriz[actual][j]
-                    if dur < min_dur:
-                        min_dur   = dur
-                        siguiente = j
-
-            if siguiente == -1:
-                break
-            visitados.add(siguiente)
-            orden.append(siguiente)
-            total += min_dur
-
-        if len(orden) == n and total < mejor_total:
-            mejor_total = total
-            mejor_orden = orden[:]
-
-    return mejor_orden
-
-
-def _vecino_mas_cercano_haversine(coords: list) -> list:
-    """Fallback: misma lógica pero con distancia en línea recta."""
-    n = len(coords)
-    if n <= 2:
-        return list(range(n))
-
-    mejor_dist  = float("inf")
-    mejor_orden = list(range(n))
-
-    for inicio in range(n):
-        visitados = {inicio}
-        orden     = [inicio]
-        total     = 0.0
-
-        while len(orden) < n:
-            actual = orden[-1]
-            min_d  = float("inf")
-            sig    = -1
-
-            for j in range(n):
-                if j not in visitados:
-                    d = _haversine(
-                        coords[actual][0], coords[actual][1],
-                        coords[j][0],     coords[j][1],
-                    )
-                    if d < min_d:
-                        min_d = d
-                        sig   = j
-
-            if sig == -1:
-                break
-            visitados.add(sig)
-            orden.append(sig)
-            total += min_d
-
-        if len(orden) == n and total < mejor_dist:
-            mejor_dist  = total
-            mejor_orden = orden[:]
-
-    return mejor_orden
-
-
-import math
-
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371000.0
-    p = math.pi / 180
-    a = (math.sin((lat2 - lat1) * p / 2) ** 2 +
-         math.cos(lat1 * p) * math.cos(lat2 * p) *
-         math.sin((lon2 - lon1) * p / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))

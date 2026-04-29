@@ -21,6 +21,7 @@ class StockDiario(Base):
     producto_id = Column(UUID(as_uuid=True),
                          ForeignKey("productos.id"), nullable=False)
     cantidad    = Column(Integer, nullable=False, default=0)
+    cantidad_reservada = Column(Integer, nullable=False, default=0)
     creado_en   = Column(TIMESTAMP(timezone=True),
                          server_default=func.now())
 
