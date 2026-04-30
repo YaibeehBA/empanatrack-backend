@@ -466,7 +466,22 @@ def marcar_visitada(
     visita.minutos_estadia  = minutos
     visita.distancia_metros = dist
     visita.es_valida        = True
-    db.commit()
+   
+# ── Liberar reservas no entregadas de esta empresa ───────
+    from app.models.pedido import Pedido as PedidoModel, PedidoItem
+
+    reservas_pendientes = db.query(PedidoModel).filter(
+        PedidoModel.empresa_id == body.empresa_id,
+        PedidoModel.tipo       == "reserva",
+        PedidoModel.estado     == "aceptado",
+        # Solo las del vendedor de esta sesión
+        PedidoModel.vendedor_id == visita.vendedor_id,
+    ).all()
+
+    for reserva in reservas_pendientes:
+        _liberar_y_cancelar(db, reserva, visita.vendedor_id, date.today())
+
+    db.commit()  
 
     return {
         "mensaje":         "Empresa marcada como visitada ✅",
@@ -475,7 +490,20 @@ def marcar_visitada(
         "distancia":       dist,
     }
 
-
+def _liberar_y_cancelar(db, pedido, vendedor_id, hoy):
+    """Cancela reserva y devuelve unidades al stock."""
+    from app.models.pedido import PedidoItem
+    for item in pedido.items:
+        stock = db.query(StockDiario).filter(
+            StockDiario.vendedor_id == vendedor_id,
+            StockDiario.producto_id == item.producto_id,
+            StockDiario.fecha       == hoy,
+        ).first()
+        if stock and stock.cantidad_reservada > 0:
+            stock.cantidad_reservada = max(
+                0, stock.cantidad_reservada - item.cantidad)
+    pedido.estado = "cancelado"
+    
 # ══════════════════════════════════════════════════════════
 #  POST /ruta-activa/completar
 # ══════════════════════════════════════════════════════════
@@ -595,7 +623,7 @@ def stock_restante(
     vendedor = _get_vendedor(db, usuario)
     hoy      = date.today()
 
-    # Verificar si hay stock registrado hoy
+    # Verificar si hay stock registrado hoy (incluyendo cantidad_reservada)
     stock_rows = db.execute(text("""
         SELECT
             sd.producto_id,
@@ -603,6 +631,7 @@ def stock_restante(
             p.precio,
             p.imagen_url,
             sd.cantidad     AS cantidad_inicial,
+            sd.cantidad_reservada AS cantidad_reservada,
             sd.creado_en    AS stock_creado_en
         FROM stock_diario sd
         JOIN productos p ON p.id = sd.producto_id
@@ -665,31 +694,37 @@ def stock_restante(
 
         if s is None:
             # Producto activo pero NO incluido en stock del día
-            # → definitivamente 0 disponible
             resultado.append({
-                "producto_id":       pid,
-                "nombre":            p["nombre"],
-                "precio":            float(p["precio"]),
-                "imagen_url":        p["imagen_url"],
-                "cantidad_inicial":  0,
-                "cantidad_vendida":  0,
-                "cantidad_restante": 0,
-                "en_stock_hoy":      False,  # ← no fue registrado
+                "producto_id":        pid,
+                "nombre":             p["nombre"],
+                "precio":             float(p["precio"]),
+                "imagen_url":         p["imagen_url"],
+                "cantidad_inicial":   0,
+                "cantidad_vendida":   0,
+                "cantidad_reservada": 0,  # ← NUEVO
+                "cantidad_restante":  0,
+                "en_stock_hoy":       False,
             })
         else:
-            inicial  = int(s["cantidad_inicial"])
-            vendido  = vendidas_map.get(pid, 0)
-            restante = max(0, inicial - vendido)
+            # ← AQUÍ ES DONDE HACES LA MODIFICACIÓN PRINCIPAL
+            inicial   = int(s["cantidad_inicial"])
+            reservado = int(s.get("cantidad_reservada", 0))  # ← NUEVO: obtener reservas
+            vendido   = vendidas_map.get(pid, 0)
+            
+            # Disponible = inicial - vendido - reservado
+            restante  = max(0, inicial - vendido - reservado)  # ← MODIFICADO: incluir reservado
             total_restante += restante
+            
             resultado.append({
-                "producto_id":       pid,
-                "nombre":            p["nombre"],
-                "precio":            float(p["precio"]),
-                "imagen_url":        p["imagen_url"],
-                "cantidad_inicial":  inicial,
-                "cantidad_vendida":  vendido,
-                "cantidad_restante": restante,
-                "en_stock_hoy":      True,
+                "producto_id":        pid,
+                "nombre":             p["nombre"],
+                "precio":             float(p["precio"]),
+                "imagen_url":         p["imagen_url"],
+                "cantidad_inicial":   inicial,
+                "cantidad_vendida":   vendido,
+                "cantidad_reservada": reservado,   # ← NUEVO
+                "cantidad_restante":  restante,    # ← MODIFICADO: usa la nueva variable
+                "en_stock_hoy":       True,
             })
 
     return {

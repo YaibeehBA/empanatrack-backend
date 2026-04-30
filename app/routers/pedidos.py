@@ -288,6 +288,23 @@ def _aceptar_pedido_atomico(
     return db.query(Pedido).filter(Pedido.id == pedido_id).first()
 
 
+
+def _liberar_stock_reserva(
+    db, pedido: Pedido, vendedor_id, hoy
+) -> None:
+    """Libera las unidades reservadas de vuelta al stock disponible."""
+    if pedido.estado not in ("aceptado", "pendiente"):
+        return
+    for item in pedido.items:
+        stock = db.query(StockDiario).filter(
+            StockDiario.vendedor_id == vendedor_id,
+            StockDiario.producto_id == item.producto_id,
+            StockDiario.fecha       == hoy,
+        ).first()
+        if stock and stock.cantidad_reservada > 0:
+            stock.cantidad_reservada = max(
+                0, stock.cantidad_reservada - item.cantidad)
+            
 # ══════════════════════════════════════════════════════════
 #  ENDPOINTS COMPARTIDOS
 # ══════════════════════════════════════════════════════════
@@ -893,3 +910,187 @@ def historial_vendedor(
     ).order_by(Pedido.creado_en.desc()).all()
     
     return [_pedido_dict(p) for p in pedidos]
+
+from app.models.ruta_activa import StockDiario
+from datetime import date
+
+# ══════════════════════════════════════════════════════════
+#  GET /pedidos/reservas-empresa/{empresa_id}
+#  Reservas pendientes/aceptadas de una empresa para el vendedor
+# ══════════════════════════════════════════════════════════
+@router.get("/reservas-empresa/{empresa_id}")
+def reservas_por_empresa(
+    empresa_id: str,
+    db:         Session = Depends(get_db),
+    usuario:    Usuario = Depends(requiere_vendedor),
+):
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id).first()
+    if not vendedor:
+        raise HTTPException(404, "Vendedor no encontrado.")
+
+    pedidos = db.query(Pedido).filter(
+        Pedido.empresa_id  == empresa_id,
+        Pedido.vendedor_id == vendedor.id,
+        Pedido.tipo        == "reserva",
+        Pedido.estado.in_(["aceptado", "pendiente"]),
+    ).order_by(Pedido.creado_en.desc()).all()
+
+    return [_pedido_dict(p) for p in pedidos]
+
+
+# ══════════════════════════════════════════════════════════
+#  POST /pedidos/{id}/aceptar-reserva  — con validación stock
+# ══════════════════════════════════════════════════════════
+@router.post("/{pedido_id}/aceptar-reserva")
+def aceptar_reserva_vendedor(
+    pedido_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_vendedor),
+):
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id).first()
+    if not vendedor:
+        raise HTTPException(404, "Vendedor no encontrado.")
+
+    pedido = db.query(Pedido).filter(
+        Pedido.id   == pedido_id,
+        Pedido.tipo == "reserva",
+    ).first()
+    if not pedido:
+        raise HTTPException(404, "Reserva no encontrada.")
+    if pedido.estado != "pendiente":
+        raise HTTPException(400, "Esta reserva ya fue procesada.")
+
+    hoy = date.today()
+
+    # ── Validar stock disponible por producto ─────────────
+    for item in pedido.items:
+        stock = db.query(StockDiario).filter(
+            StockDiario.vendedor_id == vendedor.id,
+            StockDiario.producto_id == item.producto_id,
+            StockDiario.fecha       == hoy,
+        ).first()
+
+        if not stock:
+            raise HTTPException(
+                400,
+                f"No tienes stock de "
+                f"'{item.producto.nombre if item.producto else item.producto_id}' hoy.")
+
+        # Stock disponible = cantidad - ya_reservado
+        disponible = stock.cantidad - stock.cantidad_reservada
+        if disponible < item.cantidad:
+            raise HTTPException(
+                400,
+                f"Stock insuficiente para "
+                f"'{item.producto.nombre if item.producto else item.producto_id}'. "
+                f"Disponible: {disponible}, solicitado: {item.cantidad}.")
+
+    # ── Reservar unidades en stock ────────────────────────
+    for item in pedido.items:
+        stock = db.query(StockDiario).filter(
+            StockDiario.vendedor_id == vendedor.id,
+            StockDiario.producto_id == item.producto_id,
+            StockDiario.fecha       == hoy,
+        ).first()
+        stock.cantidad_reservada += item.cantidad
+
+    # ── Aceptar pedido ────────────────────────────────────
+    pedido = _aceptar_pedido_atomico(
+        db, pedido_id, str(vendedor.id), "vendedor_id")
+
+    db.commit()
+
+    _notificar_aceptado(
+        db, pedido,
+        aceptado_por_uid = str(vendedor.usuario_id),
+        nombre_aceptador = vendedor.nombre_completo,
+    )
+    return _pedido_dict(pedido)
+
+
+# ══════════════════════════════════════════════════════════
+#  POST /pedidos/{id}/liberar-reserva
+#  Vendedor libera la reserva sin entregar — stock vuelve
+# ══════════════════════════════════════════════════════════
+@router.post("/{pedido_id}/liberar-reserva")
+def liberar_reserva(
+    pedido_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_vendedor),
+):
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id).first()
+
+    pedido = db.query(Pedido).filter(
+        Pedido.id   == pedido_id,
+        Pedido.tipo == "reserva",
+    ).first()
+    if not pedido:
+        raise HTTPException(404, "Reserva no encontrada.")
+    if pedido.estado not in ("aceptado", "pendiente"):
+        raise HTTPException(400, "No se puede liberar esta reserva.")
+
+    hoy = date.today()
+    _liberar_stock_reserva(db, pedido, vendedor.id, hoy)
+
+    pedido.estado = "cancelado"
+    db.commit()
+
+    # Notificar al cliente
+    if pedido.cliente and pedido.cliente.usuario_id:
+        _fcm_broadcast(
+            db, [str(pedido.cliente.usuario_id)],
+            titulo = "❌ Reserva cancelada",
+            cuerpo = "Tu reserva fue cancelada por el vendedor.",
+            datos  = {"tipo": "reserva_cancelada",
+                      "pedido_id": str(pedido.id)},
+        )
+
+    return _pedido_dict(pedido)
+
+
+# ══════════════════════════════════════════════════════════
+#  POST /pedidos/{id}/entregar-reserva
+#  Marca entregada y libera cantidad_reservada del stock
+# ══════════════════════════════════════════════════════════
+@router.post("/{pedido_id}/entregar-reserva")
+def entregar_reserva(
+    pedido_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_vendedor),
+):
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id).first()
+
+    pedido = db.query(Pedido).filter(
+        Pedido.id   == pedido_id,
+        Pedido.tipo == "reserva",
+    ).first()
+    if not pedido:
+        raise HTTPException(404, "Reserva no encontrada.")
+    if pedido.estado != "aceptado":
+        raise HTTPException(400, "La reserva debe estar aceptada.")
+
+    hoy = date.today()
+
+    # Descontar del stock real (no solo reservado)
+    for item in pedido.items:
+        stock = db.query(StockDiario).filter(
+            StockDiario.vendedor_id == vendedor.id,
+            StockDiario.producto_id == item.producto_id,
+            StockDiario.fecha       == hoy,
+        ).first()
+        if stock:
+            # Liberar reserva y descontar del stock total
+            stock.cantidad_reservada = max(
+                0, stock.cantidad_reservada - item.cantidad)
+            stock.cantidad = max(0, stock.cantidad - item.cantidad)
+
+    pedido.estado = "entregado"
+    db.commit()
+
+    _notificar_entregado(db, pedido)
+    # Invalidar stock en Flutter lo hará automáticamente
+    return _pedido_dict(pedido)

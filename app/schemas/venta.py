@@ -9,6 +9,7 @@ class DetalleVentaInput(BaseModel):
 
 class VentaCrear(BaseModel):
     cliente_id:  Optional[UUID] = None   # None si es contado
+    reserva_id:  Optional[str] = None 
     tipo:        str                      # "contado" o "credito"
     detalle:     List[DetalleVentaInput]
     notas:       Optional[str] = None

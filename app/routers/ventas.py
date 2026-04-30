@@ -24,22 +24,58 @@ def crear_venta(
 ):
     vendedor = db.query(Vendedor).filter(Vendedor.usuario_id == usuario.id).first()
     venta    = registrar_venta(db, datos, vendedor.id)
-    
+
     # ======================================================
-    # NUEVO: Enviar notificación push al cliente si es crédito
+    # NUEVO: Procesar reserva si viene asociada
+    # ======================================================
+    reserva_id = datos.reserva_id if hasattr(datos, 'reserva_id') else None
+    if reserva_id:
+        from app.models.pedido      import Pedido as PedidoModel
+        from app.models.ruta_activa import StockDiario
+        from datetime               import date
+
+        reserva = db.query(PedidoModel).filter(
+            PedidoModel.id   == reserva_id,
+            PedidoModel.tipo == "reserva",
+        ).first()
+
+        if reserva and reserva.estado == "aceptado":
+            hoy = date.today()
+            for item in reserva.items:
+                stock = db.query(StockDiario).filter(
+                    StockDiario.vendedor_id == vendedor.id,
+                    StockDiario.producto_id == item.producto_id,
+                    StockDiario.fecha       == hoy,
+                ).first()
+                if stock:
+                    stock.cantidad_reservada = max(
+                        0, stock.cantidad_reservada - item.cantidad)
+                    stock.cantidad = max(
+                        0, stock.cantidad - item.cantidad)
+            reserva.estado = "entregado"
+            db.commit()
+
+            print(f"\n{'='*50}")
+            print(f"📦 [VENTAS] Reserva procesada:")
+            print(f"   reserva_id: {reserva_id}")
+            print(f"   venta_id:   {venta.id}")
+            print(f"   estado:     entregado")
+            print(f"{'='*50}\n")
+
+    # ======================================================
+    # EXISTENTE: Enviar notificación push al cliente si es crédito
     # ======================================================
     if venta.tipo == "credito" and venta.cliente_id:
         from app.services.notificaciones import enviar_notificacion
-        from app.models.cliente import Cliente as ClienteModel
-        from decimal import Decimal
-        from sqlalchemy import func
+        from app.models.cliente          import Cliente as ClienteModel
+        from decimal                     import Decimal
+        from sqlalchemy                  import func
 
         cliente_obj = db.query(ClienteModel).filter(
             ClienteModel.id == venta.cliente_id
         ).first()
 
         if cliente_obj and cliente_obj.usuario_id:
-            # Calcular deuda TOTAL del cliente (no solo esta venta)
             deuda_total = db.query(
                 func.sum(Venta.monto_pendiente)
             ).filter(
@@ -54,11 +90,10 @@ def crear_venta(
             print(f"   usuario_id:  {cliente_obj.usuario_id}")
             print(f"   monto_total: ${venta.monto_total:.2f}")
             print(f"   deuda_total: ${deuda_total:.2f}")
-            
-            # Construir detalle de productos (asumiendo que venta tiene relación con detalle)
+
             detalle_texto = ", ".join([
                 f"{item.cantidad}x {item.producto.nombre}"
-                for item in venta.detalle  # Asegúrate que venta.detalle exista
+                for item in venta.detalle
             ])
 
             resultado = enviar_notificacion(
