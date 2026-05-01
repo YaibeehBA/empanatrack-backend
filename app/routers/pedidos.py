@@ -473,6 +473,16 @@ def actualizar_estado_repartidor(
     db.commit()
     if datos.estado == "entregado":
         _notificar_entregado(db, pedido)
+    elif datos.estado == "cancelado":
+        if pedido.cliente and pedido.cliente.usuario_id:
+            _fcm_broadcast(
+                db, [str(pedido.cliente.usuario_id)],
+                titulo = "❌ Pedido cancelado",
+                cuerpo = "Tu pedido fue cancelado por el repartidor. "
+                         "Puedes hacer un nuevo pedido cuando quieras.",
+                datos  = {"tipo": "pedido_cancelado",
+                          "pedido_id": str(pedido.id)},
+            )
     return _pedido_dict(pedido)
 
 
