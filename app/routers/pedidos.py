@@ -546,7 +546,83 @@ def reserva_activa_vendedor(
 
     # Devuelve lista para que el panel de empresa pueda mostrar varias
     return [_pedido_dict(p) for p in pedidos]
+# ══════════════════════════════════════════════════════════
+#  POST /pedidos/{id}/cancelar-reserva-disponible
+#  Cancela una reserva PENDIENTE sin haberla aceptado
+# ══════════════════════════════════════════════════════════
+@router.post("/{pedido_id}/cancelar-reserva-disponible")
+def cancelar_reserva_disponible(
+    pedido_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_vendedor),
+):
+   
+    vendedor = db.query(Vendedor).filter(
+        Vendedor.usuario_id == usuario.id).first()
+    if not vendedor:
+        raise HTTPException(404, "Vendedor no encontrado.")
 
+    # Cargar reserva — solo pendientes
+    pedido = db.query(Pedido).filter(
+        Pedido.id     == pedido_id,
+        Pedido.tipo   == "reserva",
+        Pedido.estado == "pendiente",
+    ).first()
+    if not pedido:
+        raise HTTPException(404, "Reserva no encontrada o ya fue procesada.")
+
+    # Verificar que la empresa esté en la ruta del vendedor
+    en_ruta = db.execute(text("""
+        SELECT 1
+        FROM ruta_empresas re
+        JOIN ruta_asignaciones ra ON ra.ruta_id = re.ruta_id
+            AND ra.vendedor_id = :vid
+            AND ra.esta_activa = TRUE
+        JOIN rutas r ON r.id = re.ruta_id AND r.esta_activa = TRUE
+        WHERE re.empresa_id = :eid
+        LIMIT 1
+    """), {"vid": str(vendedor.id), "eid": str(pedido.empresa_id)}).first()
+    if not en_ruta:
+        raise HTTPException(403, "Esta empresa no pertenece a tu ruta.")
+
+    pedido.estado = "cancelado"
+    db.commit()
+
+    # Notificar al cliente vía FCM
+    if pedido.cliente and pedido.cliente.usuario_id:
+        _fcm_broadcast(
+            db, [str(pedido.cliente.usuario_id)],
+            titulo = "❌ Reserva rechazada",
+            cuerpo = f"{vendedor.nombre_completo} no pudo aceptar tu reserva en "
+                     f"{pedido.empresa.nombre if pedido.empresa else 'la empresa'}.",
+            datos  = {"tipo": "reserva_rechazada", "pedido_id": str(pedido.id)},
+        )
+
+    # Notificar al vendedor vía WS para actualizar badge y lista en tiempo real
+    try:
+        import asyncio, threading
+        mensaje_ws = {
+            "tipo":       "reserva_cancelada",
+            "pedido_id":  str(pedido.id),
+            "empresa_id": str(pedido.empresa_id) if pedido.empresa_id else None,
+        }
+        def _enviar_ws():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    ws_manager.notificar_vendedor(
+                        str(vendedor.usuario_id), mensaje_ws))
+            finally:
+                loop.close()
+        threading.Thread(target=_enviar_ws, daemon=True).start()
+    except Exception as e:
+        print(f"❌ [WS] Error notificando cancelación: {e}")
+
+    return {
+        "mensaje": "Reserva cancelada correctamente",
+        "pedido_id": str(pedido.id)
+    }
 
 @router.post("/{pedido_id}/aceptar-reserva")
 def aceptar_reserva_vendedor(
