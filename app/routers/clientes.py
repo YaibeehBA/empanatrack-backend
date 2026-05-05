@@ -1,6 +1,8 @@
 from decimal import Decimal
 from typing  import List, Optional
 from datetime import date  
+from fastapi import Depends
+from app.utils.paginacion import PaginaParams
 
 from fastapi             import APIRouter, Depends, HTTPException, Query
 from sqlalchemy          import or_
@@ -294,30 +296,61 @@ def obtener_saldo(
 # ══════════════════════════════════════════════════════════
 #  GET /clientes/{cliente_id}/historial
 # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
+
 @router.get("/{cliente_id}/historial")
 def historial_cliente(
     cliente_id: UUID,
-    db:         Session = Depends(get_db),
-    usuario:    Usuario = Depends(get_usuario_actual),
+    params:     PaginaParams = Depends(),       # ← paginación automática
+    db:         Session      = Depends(get_db),
+    usuario:    Usuario      = Depends(get_usuario_actual),
 ):
     if usuario.rol == "cliente":
         if not usuario.cliente or \
                 str(usuario.cliente.id) != str(cliente_id):
             raise HTTPException(
                 status_code=403,
-                detail="Solo puedes ver tu propio historial.",
-            )
+                detail="Solo puedes ver tu propio historial.")
 
-    resultado = db.execute(
+    # Primero obtener el total para paginación
+    total_row = db.execute(
         text("""
-            SELECT * FROM vista_historial_cliente
+            SELECT COUNT(*) AS total
+            FROM vista_historial_cliente
             WHERE cliente_id = :cid
-            ORDER BY fecha DESC
         """),
         {"cid": str(cliente_id)},
+    ).mappings().first()
+
+    total = int(total_row["total"]) if total_row else 0
+
+    # Luego traer solo la página solicitada
+    filas = db.execute(
+        text("""
+            SELECT *
+            FROM vista_historial_cliente
+            WHERE cliente_id = :cid
+            ORDER BY fecha DESC
+            LIMIT  :limite
+            OFFSET :offset
+        """),
+        {
+            "cid":    str(cliente_id),
+            "limite": params.por_pagina,
+            "offset": params.offset,
+        },
     ).mappings().all()
 
-    return [dict(r) for r in resultado]
+    datos     = [dict(f) for f in filas]
+    tiene_mas = (params.offset + len(datos)) < total
+
+    return {
+        "datos":      datos,
+        "pagina":     params.pagina,
+        "por_pagina": params.por_pagina,
+        "total":      total,
+        "tiene_mas":  tiene_mas,
+    }
 
 @router.delete("/{cliente_id}")
 def eliminar_cliente(

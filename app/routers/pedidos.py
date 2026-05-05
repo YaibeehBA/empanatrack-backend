@@ -1,6 +1,8 @@
 from datetime  import datetime, timezone
 from decimal   import Decimal
 from typing    import List, Optional
+from fastapi import Depends
+from app.utils.paginacion import PaginaParams
 
 from fastapi        import APIRouter, Depends, HTTPException, Query
 from pydantic       import BaseModel
@@ -276,22 +278,45 @@ def obtener_configuracion(
     }
 
 
+# ══════════════════════════════════════════════════════════
+#  GET /pedidos/mis-pedidos  — con paginación
+# ══════════════════════════════════════════════════════════
+
 @router.get("/mis-pedidos")
 def mis_pedidos(
-    db:      Session = Depends(get_db),
-    usuario: Usuario = Depends(get_usuario_actual),
+    params:  PaginaParams = Depends(),
+    db:      Session      = Depends(get_db),
+    usuario: Usuario      = Depends(get_usuario_actual),
 ):
     if usuario.rol != "cliente":
         raise HTTPException(403, "Solo clientes.")
+
     cliente = db.query(Cliente).filter(
         Cliente.usuario_id == usuario.id).first()
     if not cliente:
-        return []
-    pedidos = db.query(Pedido).filter(
-        Pedido.cliente_id == cliente.id
-    ).order_by(Pedido.creado_en.desc()).all()
-    return [_pedido_dict(p) for p in pedidos]
+        return {
+            "datos":      [],
+            "pagina":     params.pagina,
+            "por_pagina": params.por_pagina,
+            "total":      0,
+            "tiene_mas":  False,
+        }
 
+    query = db.query(Pedido).filter(
+        Pedido.cliente_id == cliente.id
+    ).order_by(Pedido.creado_en.desc())
+
+    total  = query.count()
+    filas  = query.offset(params.offset).limit(params.por_pagina).all()
+    datos  = [_pedido_dict(p) for p in filas]
+
+    return {
+        "datos":      datos,
+        "pagina":     params.pagina,
+        "por_pagina": params.por_pagina,
+        "total":      total,
+        "tiene_mas":  (params.offset + len(datos)) < total,
+    }
 
 # ══════════════════════════════════════════════════════════
 #  ENDPOINTS CLIENTE
@@ -485,7 +510,67 @@ def actualizar_estado_repartidor(
             )
     return _pedido_dict(pedido)
 
+# ══════════════════════════════════════════════════════════
+#  POST /pedidos/{id}/cancelar-pedido-disponible
+#  Cancela un pedido PENDIENTE sin haberlo aceptado (solo repartidor)
+# ══════════════════════════════════════════════════════════
+@router.post("/{pedido_id}/cancelar-pedido-disponible")
+def cancelar_pedido_disponible(
+    pedido_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_repartidor),
+):
 
+    repartidor = db.query(Repartidor).filter(
+        Repartidor.usuario_id == usuario.id).first()
+    if not repartidor:
+        raise HTTPException(404, "Repartidor no encontrado.")
+
+    # Cargar pedido — solo pendientes, tipo normal
+    pedido = db.query(Pedido).filter(
+        Pedido.id     == pedido_id,
+        Pedido.tipo   == "normal",
+        Pedido.estado == "pendiente",
+    ).first()
+    if not pedido:
+        raise HTTPException(404, "Pedido no encontrado o ya fue procesado.")
+
+    pedido.estado = "cancelado"
+    db.commit()
+
+    # Notificar al cliente vía FCM
+    if pedido.cliente and pedido.cliente.usuario_id:
+        _fcm_broadcast(
+            db, [str(pedido.cliente.usuario_id)],
+            titulo = "❌ Pedido rechazado",
+            cuerpo = f"{repartidor.nombre_completo} no pudo aceptar tu pedido.",
+            datos  = {"tipo": "pedido_rechazado", "pedido_id": str(pedido.id)},
+        )
+
+    # Notificar al repartidor vía WS para actualizar lista en tiempo real
+    try:
+        import asyncio, threading
+        mensaje_ws = {
+            "tipo":       "pedido_cancelado",
+            "pedido_id":  str(pedido.id),
+        }
+        def _enviar_ws():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    ws_manager.notificar_repartidor(
+                        str(repartidor.usuario_id), mensaje_ws))
+            finally:
+                loop.close()
+        threading.Thread(target=_enviar_ws, daemon=True).start()
+    except Exception as e:
+        print(f"❌ [WS] Error notificando cancelación: {e}")
+
+    return {
+        "mensaje": "Pedido cancelado correctamente",
+        "pedido_id": str(pedido.id)
+    }
 # ══════════════════════════════════════════════════════════
 #  ENDPOINTS VENDEDOR — RESERVAS
 #  (cada ruta definida UNA SOLA VEZ)
