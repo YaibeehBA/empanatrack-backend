@@ -264,3 +264,42 @@ async def ws_ruta_vendedor(
                 print(f"❌ [WS] Error ruta-vendedor: {e}")
     except WebSocketDisconnect:
         print(f"🔌 [WS] Ruta vendedor desconectado: {usuario_id}")
+        
+
+@router.websocket("/ws/admin")
+async def ws_admin(
+    websocket: WebSocket,
+    token:     str = Query(...),
+):
+    try:
+        payload    = decodificar_token(token)
+        usuario_id = payload.get("sub")
+        if not usuario_id:
+            await websocket.close(code=1008)
+            return
+        db      = next(get_db())
+        usuario = db.query(Usuario).filter(
+            Usuario.id == usuario_id).first()
+        db.close()
+        if not usuario or usuario.rol != "administrador":
+            await websocket.close(code=1008)
+            return
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
+    await ws_manager.conectar_admin(websocket, str(usuario_id))
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("tipo") == "ping":
+                    ws_manager.registrar_pong(websocket)
+                    await websocket.send_text(
+                        json.dumps({"tipo": "pong"}))
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        ws_manager.desconectar_admin(websocket, str(usuario_id))

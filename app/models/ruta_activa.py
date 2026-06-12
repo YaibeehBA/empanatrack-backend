@@ -3,7 +3,7 @@ from sqlalchemy import (
     Column, String, Integer, Boolean,
     Date, ForeignKey, DECIMAL
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy import TIMESTAMP, func
 from app.database import Base
@@ -79,3 +79,31 @@ class VisitaVerificada(Base):
     sesion  = relationship("SesionRuta", back_populates="visitas")
     empresa = relationship("Empresa")
     
+
+class RecargaStock(Base):
+    __tablename__ = "recargas_stock"
+
+    id                    = Column(UUID(as_uuid=True), primary_key=True,
+                                   default=uuid.uuid4)
+    sesion_id             = Column(UUID(as_uuid=True),
+                                   ForeignKey("sesiones_ruta.id"),
+                                   nullable=False)
+    vendedor_id           = Column(UUID(as_uuid=True),
+                                   ForeignKey("vendedores.id"),
+                                   nullable=False)
+    estado                = Column(String(20), nullable=False,
+                                   default="pendiente")
+ 
+    productos_solicitados = Column(JSON, nullable=True)  
+    productos_aprobados   = Column(JSON, nullable=True)  
+    lat_recarga           = Column(DECIMAL(10, 8), nullable=True)
+    lng_recarga           = Column(DECIMAL(11, 8), nullable=True)
+    direccion_recarga     = Column(String(500), nullable=True)
+    notas_admin           = Column(String(500), nullable=True)
+    solicitado_en         = Column(TIMESTAMP(timezone=True),
+                                   server_default=func.now())
+    respondido_en         = Column(TIMESTAMP(timezone=True), nullable=True)
+    completado_en         = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    sesion   = relationship("SesionRuta")
+    vendedor = relationship("Vendedor")

@@ -53,6 +53,7 @@ class WebSocketManager:
     def __init__(self) -> None:
         self._vendedores:      Dict[str, WebSocket]        = {}
         self._suscriptores:    Dict[str, List[WebSocket]]  = defaultdict(list)
+        self._admins:          Dict[str, WebSocket]        = {}  # Administradores
         self._heartbeat_tasks: Dict[int, asyncio.Task]     = {}
         # ── NUEVO: timestamps del último pong recibido por socket ──
         self._ultimo_pong:     Dict[int, float]            = {}
@@ -163,6 +164,51 @@ class WebSocketManager:
         if not lista:
             del self._suscriptores[sesion_key]
         self._cancelar_heartbeat(websocket)
+
+    # ── Administradores ───────────────────────────────────────────────────────
+
+    async def conectar_admin(
+        self,
+        websocket:  WebSocket,
+        usuario_id: str,
+    ) -> bool:
+        await websocket.accept()
+        viejo = self._admins.get(usuario_id)
+        if viejo:
+            try:
+                await viejo.close(code=4000, reason="reconexion")
+            except Exception:
+                pass
+        self._admins[usuario_id] = websocket
+        self._iniciar_heartbeat(websocket, usuario_id, rol="admin")
+        logger.info("Admin %s conectado", usuario_id)
+        return True
+
+    def desconectar_admin(self, websocket: WebSocket, usuario_id: str) -> None:
+        ws_actual = self._admins.get(usuario_id)
+        if ws_actual is websocket:
+            del self._admins[usuario_id]
+        self._cancelar_heartbeat(websocket)
+
+    async def notificar_admin(self, usuario_id: str, mensaje: dict) -> bool:
+        ws = self._admins.get(usuario_id)
+        if not ws:
+            return False
+        ok = await _safe_send(ws, json.dumps(mensaje))
+        if not ok:
+            self.desconectar_admin(ws, usuario_id)
+        return ok
+
+    async def notificar_todos_admins(self, mensaje: dict) -> None:
+        if not self._admins:
+            return
+        datos = json.dumps(mensaje)
+        items = list(self._admins.items())
+        resultados = await asyncio.gather(
+            *[_safe_send(ws, datos) for _, ws in items])
+        for (uid, ws), ok in zip(items, resultados):
+            if not ok:
+                self.desconectar_admin(ws, uid)
 
     # ── Broadcast ─────────────────────────────────────────────────────────────
 
@@ -298,6 +344,7 @@ class WebSocketManager:
             "sesiones_activas":    len(self._suscriptores),
             "total_suscriptores":  sum(
                 len(v) for v in self._suscriptores.values()),
+            "admins_activos":      len(self._admins),
             "heartbeats_activos":  len(self._heartbeat_tasks),
         }
 

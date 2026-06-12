@@ -3,24 +3,31 @@ from math      import radians, sin, cos, sqrt, atan2
 from typing    import List, Optional
 from uuid      import UUID
 
-from fastapi        import APIRouter, Depends, HTTPException
+import json
+import logging
+
+from fastapi        import APIRouter, Depends, HTTPException, logger
 from pydantic       import BaseModel
 from sqlalchemy     import text
 from sqlalchemy.orm import Session
 
 from app.database          import get_db
 from app.models.ruta_activa import StockDiario, SesionRuta, VisitaVerificada
+from app.services.websocket_manager import ws_manager
+from app.models.ruta_activa import RecargaStock
 from app.models.producto   import Producto
 from app.models.vendedor   import Vendedor
 from app.models.usuario    import Usuario
-from app.core.dependencies import requiere_vendedor
+from app.core.dependencies import requiere_admin, requiere_vendedor
 
+
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ruta-activa", tags=["Ruta Activa"])
 
 # ── Constantes de verificación ────────────────────────────
 DISTANCIA_MAX_METROS = 150   # radio para considerar "en empresa"
 MINUTOS_MIN_ESTADIA  = 3     # tiempo mínimo en zona para marcar
-
+MAX_RECARGAS_POR_SESION = 5
 
 # ══════════════════════════════════════════════════════════
 #  HELPERS
@@ -75,7 +82,28 @@ class MarcarVisitadaBody(BaseModel):
 class CompletarRutaBody(BaseModel):
     sesion_id: str
 
+class ItemRecargaSolicitado(BaseModel):
+    producto_id: str
+    nombre:      str
+    cantidad:    int
+    precio:      float
 
+class SolicitarRecargaBody(BaseModel):
+    sesion_id: str
+    productos: List[ItemRecargaSolicitado]
+    notas:     Optional[str] = None
+
+class ResponderRecargaBody(BaseModel):
+    recarga_id:        str
+    accion:            str   # "aceptar" | "rechazar"
+    productos:         Optional[List[ItemRecargaSolicitado]] = None
+    lat_recarga:       Optional[float]  = None
+    lng_recarga:       Optional[float]  = None
+    direccion_recarga: Optional[str]    = None
+    notas_admin:       Optional[str]    = None
+
+class CompletarRecargaBody(BaseModel):
+    recarga_id: str
 # ══════════════════════════════════════════════════════════
 #  GET /ruta-activa/estado-hoy
 #  Estado completo del vendedor para hoy
@@ -733,3 +761,349 @@ def stock_restante(
         "sin_stock":      total_restante == 0,
         "stock_cargado":  True,
     }
+
+# ══════════════════════════════════════════════════════════
+#  POST /ruta-activa/solicitar-recarga
+# ══════════════════════════════════════════════════════════
+@router.post("/solicitar-recarga")
+async def solicitar_recarga(
+    body:    SolicitarRecargaBody,
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor),
+):
+    """
+    Vendedor solicita recarga con lista de productos.
+    Guarda productos_solicitados como JSON.
+    """
+    vendedor = _get_vendedor(db, usuario)
+ 
+    sesion = db.query(SesionRuta).filter(
+        SesionRuta.id    == body.sesion_id,
+        SesionRuta.estado == "iniciada",
+    ).first()
+    if not sesion:
+        raise HTTPException(404, "Sesión no encontrada o no activa.")
+ 
+    if str(sesion.vendedor_id) != str(vendedor.id):
+        raise HTTPException(403, "No tienes acceso a esta sesión.")
+ 
+    # Verificar límite de recargas
+    total_recargas = db.query(RecargaStock).filter(
+        RecargaStock.sesion_id == body.sesion_id,
+    ).count()
+    if total_recargas >= MAX_RECARGAS_POR_SESION:
+        raise HTTPException(
+            400,
+            f"Has alcanzado el límite de {MAX_RECARGAS_POR_SESION} recargas.")
+ 
+    # Verificar que no hay recarga pendiente o aceptada
+    recarga_activa = db.query(RecargaStock).filter(
+        RecargaStock.sesion_id == body.sesion_id,
+        RecargaStock.estado.in_(["pendiente", "aceptada"]),
+    ).first()
+    if recarga_activa:
+        raise HTTPException(
+            400,
+            "Ya tienes una solicitud de recarga activa.")
+ 
+    # Guardar productos solicitados como JSON
+    productos_json = json.dumps([
+        {
+            "producto_id": p.producto_id,
+            "nombre":      p.nombre,
+            "cantidad":    p.cantidad,
+            "precio":      p.precio,
+        }
+        for p in body.productos
+    ])
+ 
+    recarga = RecargaStock(
+        sesion_id             = body.sesion_id,
+        vendedor_id           = vendedor.id,
+        productos_solicitados = productos_json,
+        notas_admin           = body.notas,
+    )
+    db.add(recarga)
+    db.commit()
+    db.refresh(recarga)
+ 
+    # Notificar a admins por WS
+    recargas_usadas = total_recargas + 1
+    try:
+        productos_data = json.loads(productos_json)
+    except:
+        productos_data = []
+ 
+    mensaje_admin = {
+        "tipo":              "solicitud_recarga",
+        "recarga_id":        str(recarga.id),
+        "sesion_id":         body.sesion_id,
+        "vendedor_nombre":   vendedor.nombre_completo,
+        "vendedor_id":       str(vendedor.id),
+        "productos":         productos_data,
+        "recargas_usadas":   recargas_usadas,
+        "recargas_max":      MAX_RECARGAS_POR_SESION,
+        "notas":             body.notas,
+        "solicitado_en":     recarga.solicitado_en.isoformat(),
+    }
+    await ws_manager.notificar_todos_admins(mensaje_admin)
+ 
+    logger.info(
+        f"Vendedor {vendedor.id} solicitó recarga con "
+        f"{len(body.productos)} productos")
+ 
+    return {
+        "recarga_id":      str(recarga.id),
+        "estado":          recarga.estado,
+        "recargas_usadas": recargas_usadas,
+        "recargas_max":    MAX_RECARGAS_POR_SESION,
+        "mensaje":         "Solicitud enviada con los productos.",
+    }
+ 
+ 
+# ══════════════════════════════════════════════════════════
+#  POST /ruta-activa/responder-recarga  (admin)
+# ══════════════════════════════════════════════════════════
+@router.post("/responder-recarga")
+async def responder_recarga(
+    body:    ResponderRecargaBody,
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    """
+    Admin aprueba o rechaza recarga.
+    Si aprueba, puede modificar cantidades en productos.
+    Guarda productos_aprobados como JSON.
+    """
+    if body.accion not in ("aceptar", "rechazar"):
+        raise HTTPException(400, "Acción inválida.")
+ 
+    recarga = db.query(RecargaStock).filter(
+        RecargaStock.id == body.recarga_id,
+    ).first()
+    if not recarga:
+        raise HTTPException(404, "Solicitud no encontrada.")
+    if recarga.estado != "pendiente":
+        raise HTTPException(400, "La solicitud ya fue procesada.")
+ 
+    if body.accion == "aceptar":
+        if not body.lat_recarga or not body.lng_recarga:
+            raise HTTPException(
+                400, "Debes proporcionar lat_recarga y lng_recarga.")
+ 
+        # Guardar productos aprobados (puede modificar cantidades)
+        productos_aprobados_json = json.dumps([
+            {
+                "producto_id": p.producto_id,
+                "nombre":      p.nombre,
+                "cantidad":    p.cantidad,
+                "precio":      p.precio,
+            }
+            for p in (body.productos or [])
+        ])
+ 
+        recarga.estado              = "aceptada"
+        recarga.productos_aprobados = productos_aprobados_json
+        recarga.lat_recarga         = body.lat_recarga
+        recarga.lng_recarga         = body.lng_recarga
+        recarga.direccion_recarga   = body.direccion_recarga
+        recarga.notas_admin         = body.notas_admin
+    else:
+        recarga.estado      = "rechazada"
+        recarga.notas_admin = body.notas_admin
+ 
+    recarga.respondido_en = datetime.now(timezone.utc)
+    db.commit()
+ 
+    # Notificar al vendedor
+    vendedor = recarga.vendedor
+    if vendedor and vendedor.usuario_id:
+        productos_data = []
+        if recarga.productos_aprobados:
+            try:
+                productos_data = json.loads(recarga.productos_aprobados)
+            except:
+                pass
+ 
+        mensaje_vendedor = {
+            "tipo":               "recarga_respondida",
+            "recarga_id":         str(recarga.id),
+            "estado":             recarga.estado,
+            "productos_aprobados": productos_data,
+            "lat_recarga":        float(recarga.lat_recarga)
+                                  if recarga.lat_recarga else None,
+            "lng_recarga":        float(recarga.lng_recarga)
+                                  if recarga.lng_recarga else None,
+            "direccion_recarga":  recarga.direccion_recarga,
+            "notas_admin":        recarga.notas_admin,
+        }
+        await ws_manager.notificar_vendedor(
+            str(vendedor.usuario_id), mensaje_vendedor)
+ 
+    logger.info(f"Admin respondió recarga {recarga.id}: {body.accion}")
+ 
+    return {
+        "recarga_id": str(recarga.id),
+        "estado":     recarga.estado,
+        "mensaje":    "Respuesta enviada al vendedor.",
+    }
+ 
+ 
+# ══════════════════════════════════════════════════════════
+#  POST /ruta-activa/completar-recarga
+#  Vendedor confirma que recibió → actualiza stock
+# ══════════════════════════════════════════════════════════
+@router.post("/completar-recarga")
+def completar_recarga(
+    body:    CompletarRecargaBody,
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_vendedor),
+):
+    vendedor = _get_vendedor(db, usuario)
+ 
+    recarga = db.query(RecargaStock).filter(
+        RecargaStock.id          == body.recarga_id,
+        RecargaStock.vendedor_id == vendedor.id,
+        RecargaStock.estado      == "aceptada",
+    ).first()
+ 
+    if not recarga:
+        raise HTTPException(404, "Recarga no encontrada o no está aceptada.")
+ 
+    productos_json = recarga.productos_aprobados or recarga.productos_solicitados
+ 
+    if productos_json:
+        try:
+            productos = json.loads(productos_json)
+            hoy = date.today()
+            for prod in productos:
+                pid = prod.get("producto_id")
+                qty = int(prod.get("cantidad", 0))
+                if not pid or qty <= 0:
+                    continue
+ 
+                stock_item = db.query(StockDiario).filter(
+                    StockDiario.vendedor_id == vendedor.id,
+                    StockDiario.producto_id == pid,
+                    StockDiario.fecha       == hoy,
+                ).first()
+ 
+                if stock_item:
+                    stock_item.cantidad += qty
+                else:
+                    db.add(StockDiario(
+                        vendedor_id = vendedor.id,
+                        producto_id = pid,
+                        fecha       = hoy,
+                        cantidad    = qty,
+                    ))
+ 
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[completar-recarga] Error: {e}", exc_info=True)
+            raise HTTPException(500, f"Error al actualizar stock: {str(e)}")
+ 
+    # Un solo commit que guarda stock + estado juntos
+    recarga.estado        = "completada"
+    recarga.completado_en = datetime.now(timezone.utc)
+    db.commit()
+ 
+    logger.info(f"[completar-recarga] Recarga {recarga.id} completada OK")
+ 
+    return {
+        "recarga_id": str(recarga.id),
+        "estado":     "completada",
+        "mensaje":    "Stock actualizado exitosamente.",
+    }
+ 
+# ══════════════════════════════════════════════════════════
+#  GET /ruta-activa/recarga-activa/{sesion_id}
+# ══════════════════════════════════════════════════════════
+@router.get("/recarga-activa/{sesion_id}")
+def recarga_activa(
+    sesion_id: str,
+    db:        Session = Depends(get_db),
+    usuario:   Usuario = Depends(requiere_vendedor),
+):
+    """
+    Obtiene la recarga activa (pendiente o aceptada).
+    """
+    recarga = db.query(RecargaStock).filter(
+        RecargaStock.sesion_id == sesion_id,
+        RecargaStock.estado.in_(["pendiente", "aceptada"]),
+    ).order_by(RecargaStock.solicitado_en.desc()).first()
+ 
+    total = db.query(RecargaStock).filter(
+        RecargaStock.sesion_id == sesion_id,
+    ).count()
+ 
+    if not recarga:
+        return {
+            "tiene_recarga_activa": False,
+            "recargas_usadas":      total,
+            "recargas_max":         MAX_RECARGAS_POR_SESION,
+        }
+ 
+    # Parsear productos aprobados si existen
+    productos_aprobados = []
+    if recarga.productos_aprobados:
+        try:
+            productos_aprobados = json.loads(recarga.productos_aprobados)
+        except:
+            pass
+ 
+    return {
+        "tiene_recarga_activa": True,
+        "recarga_id":           str(recarga.id),
+        "estado":               recarga.estado,
+        "productos_aprobados":  productos_aprobados,
+        "lat_recarga":          float(recarga.lat_recarga)
+                                if recarga.lat_recarga else None,
+        "lng_recarga":          float(recarga.lng_recarga)
+                                if recarga.lng_recarga else None,
+        "direccion_recarga":    recarga.direccion_recarga,
+        "notas_admin":          recarga.notas_admin,
+        "solicitado_en":        recarga.solicitado_en.isoformat(),
+        "recargas_usadas":      total,
+        "recargas_max":         MAX_RECARGAS_POR_SESION,
+    }
+ 
+ 
+# ══════════════════════════════════════════════════════════
+#  GET /ruta-activa/solicitudes-recarga  (admin)
+# ══════════════════════════════════════════════════════════
+@router.get("/solicitudes-recarga")
+def solicitudes_recarga_pendientes(
+    db:      Session = Depends(get_db),
+    usuario: Usuario = Depends(requiere_admin),
+):
+    """
+    Admin obtiene todas las solicitudes pendientes.
+    """
+    recargas = db.query(RecargaStock).filter(
+        RecargaStock.estado == "pendiente",
+    ).order_by(RecargaStock.solicitado_en.desc()).all()
+ 
+    result = []
+    for r in recargas:
+        # Parsear productos solicitados
+        productos = []
+        if r.productos_solicitados:
+            try:
+                productos = json.loads(r.productos_solicitados)
+            except:
+                pass
+ 
+        result.append({
+            "recarga_id":      str(r.id),
+            "sesion_id":       str(r.sesion_id),
+            "vendedor_nombre": r.vendedor.nombre_completo
+                               if r.vendedor else "",
+            "vendedor_id":     str(r.vendedor_id),
+            "productos":       productos,
+            "estado":          r.estado,
+            "notas":           r.notas_admin,
+            "solicitado_en":   r.solicitado_en.isoformat(),
+        })
+ 
+    return result
